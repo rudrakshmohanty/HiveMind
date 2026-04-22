@@ -1,0 +1,14 @@
+node_modules
+frontend/.next
+backend/__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.pyc
+*.pyd
+*.pyo
+*.egg
+*.egg-info
+dist
+build
+*.log
