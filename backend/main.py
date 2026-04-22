@@ -1,39 +1,48 @@
 """
-FastAPI backend for the Ollama‑chat MVP.
+FastAPI backend for the Ollama Chat application.
 
 Endpoints:
-  - /api/status  – Returns a health check of the Ollama container and the list of loaded models.
-  - (other endpoints will be added later)
+  - /api/health     - Health check
+  - /api/status     - Ollama status and model list
+  - /api/models     - Available Ollama models
+  - /api/chat       - Non-streaming chat
+  - /api/chat/stream - Streaming chat (SSE)
+  - /api/conversations/* - CRUD for conversations
 """
-
 import os
 from fastapi import FastAPI
-import httpx
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import inspect
+from .database import engine, Base
+from .routers import chat, conversations, health
 
-app = FastAPI(title="Ollama Chat Backend")
-import chat
+app = FastAPI(title="Ollama Chat", version="0.1.0")
+
+# CORS for local dev
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Create tables on startup
+Base.metadata.create_all(bind=engine)
+
+app.include_router(health.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
+app.include_router(conversations.router, prefix="/api/conversations")
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
 
-@app.get("/api/status")
-async def status() -> dict:
-    """Health check that pings the Ollama container.
+@app.on_event("startup")
+async def startup():
+    """Verify database tables are created."""
+    inspector = inspect(engine)
+    tables = inspector.get_table_names()
+    print(f"Database tables: {tables}")
 
-    It tries to fetch the list of available models from the Ollama API.
-    Returns a JSON object with the overall status and the raw Ollama response.
-    """
-    async with httpx.AsyncClient() as client:
-        try:
-            resp = await client.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=2)
-            resp.raise_for_status()
-            return {"status": "ok", "ollama_models": resp.json()}
-        except httpx.HTTPError as exc:
-            return {"status": "error", "detail": str(exc)}
-        except Exception as exc:
-            return {"status": "error", "detail": str(exc)}
 
-# A simple health‑check endpoint that can be used by Kubernetes or other orchestrators.
 @app.get("/health")
-async def health() -> dict:
+async def root_health():
     return {"status": "ok"}
