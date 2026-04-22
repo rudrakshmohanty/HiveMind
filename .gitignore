@@ -1,4 +1,4 @@
-*.md
+# *.md
 .ollama-test-venv
 *.env
 *.db
