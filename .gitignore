@@ -1,2 +1,8 @@
 *.md
 .ollama-test-venv
+*.env
+*.db
+node_modules/
+__pycache__/
+*.pyc
+.claude
