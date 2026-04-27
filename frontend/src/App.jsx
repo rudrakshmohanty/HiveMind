@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import {
   Button,
   Select,
@@ -33,6 +35,7 @@ import {
 import './index.scss';
 
 const API_BASE = '/api';
+const THEME_STORAGE_KEY = 'ollama-chat-theme';
 
 const DEFAULT_SETTINGS = {
   temperature: 0.7,
@@ -87,7 +90,35 @@ function MessageBubble({ message }) {
           <span>{isUser ? 'You' : message.model || 'Assistant'}</span>
           <span>{formatTime(message.created_at)}</span>
         </div>
-        <div className="bubble-content">{message.content}</div>
+        <div className={`bubble-content ${isUser ? 'bubble-content-user' : 'markdown-content'}`}>
+          {isUser ? (
+            message.content
+          ) : (
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                a: ({ href, children }) => (
+                  <a href={href} target="_blank" rel="noreferrer">
+                    {children}
+                  </a>
+                ),
+                pre: ({ children }) => <pre className="md-code-block">{children}</pre>,
+                code: ({ inline, className, children, ...props }) =>
+                  inline ? (
+                    <code className="md-inline-code" {...props}>
+                      {children}
+                    </code>
+                  ) : (
+                    <code className={className} {...props}>
+                      {children}
+                    </code>
+                  ),
+              }}
+            >
+              {message.content || ''}
+            </ReactMarkdown>
+          )}
+        </div>
       </div>
     </article>
   );
@@ -99,8 +130,8 @@ function EmptyState() {
       <div className="empty-state-icon">
         <Chat />
       </div>
-      <h2>Start a private conversation</h2>
-      <p>Choose a model, write a prompt, and let the local Ollama backend handle the rest.</p>
+      <h2>Start a conversation</h2>
+      <p>Choose a model, write a prompt, and let the AI handle the rest.</p>
     </div>
   );
 }
@@ -119,6 +150,11 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sending, setSending] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [theme, setTheme] = useState(() => {
+    const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if (storedTheme === 'light' || storedTheme === 'dark') return storedTheme;
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  });
   const [settings, setSettings] = useState(() => {
     const stored = window.localStorage.getItem('ollama-chat-settings');
     return stored ? { ...DEFAULT_SETTINGS, ...JSON.parse(stored) } : DEFAULT_SETTINGS;
@@ -204,6 +240,10 @@ export default function App() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+  }, [theme]);
 
   useEffect(() => {
     const keyHandler = (event) => {
@@ -396,39 +436,54 @@ export default function App() {
     setSettingsOpen(false);
   };
 
+  const handleThemeToggle = () => {
+    setTheme((current) => {
+      const next = current === 'dark' ? 'light' : 'dark';
+      window.localStorage.setItem(THEME_STORAGE_KEY, next);
+      return next;
+    });
+  };
+
   const modelSummary = models.find((model) => model.name === selectedModel) || models[0] || null;
 
   return (
     <div className={`app-shell ${sidebarOpen ? 'sidebar-open' : 'sidebar-closed'}`}>
       <aside className="sidebar">
-        <div className="sidebar-brand">
-          <div className="brand-copy">
-            <p className="eyebrow">Self-hosted AI workspace</p>
-            <h1>Ollama Chat</h1>
-            <p>Carbon UI, local models, and conversation history in one place.</p>
+        <div className="sidebar-top">
+          <div className="sidebar-brand">
+            <div className="brand-copy">
+              <p className="eyebrow">Welcome</p>
+              <h1>Ollama Chat</h1>
+              <p>History</p>
+            </div>
+
+            <div className="sidebar-brand-actions">
+              <Button kind="primary" renderIcon={Add} size="sm" onClick={handleNewConversation}>
+                New chat
+              </Button>
+              <Button kind="tertiary" renderIcon={Renew} size="sm" onClick={refreshModels}>
+                Refresh
+              </Button>
+            </div>
           </div>
 
-          <div className="sidebar-brand-actions">
-            <Button kind="primary" renderIcon={Add} size="sm" onClick={handleNewConversation}>
-              New chat
-            </Button>
-            <Button kind="tertiary" renderIcon={Renew} size="sm" onClick={refreshModels}>
-              Refresh
-            </Button>
+          <div className="sidebar-search">
+            <TextInput
+              id="conversation-search"
+              labelText="Search conversations"
+              hideLabel
+              placeholder="Search conversations"
+              value={searchTerm}
+              onChange={(event) => setSearchTerm(event.target.value)}
+              size="sm"
+              renderIcon={Search}
+            />
           </div>
         </div>
 
-        <div className="sidebar-search">
-          <TextInput
-            id="conversation-search"
-            labelText="Search conversations"
-            hideLabel
-            placeholder="Search conversations"
-            value={searchTerm}
-            onChange={(event) => setSearchTerm(event.target.value)}
-            size="sm"
-            renderIcon={Search}
-          />
+        <div className="sidebar-list-header">
+          <p className="eyebrow">Conversations</p>
+          <span>{filteredConversations.length}</span>
         </div>
 
         <div className="conversation-stack">
@@ -475,13 +530,16 @@ export default function App() {
         </div>
 
         <div className="sidebar-footer">
-          <Button kind="ghost" size="sm" renderIcon={Settings} onClick={() => setSettingsOpen(true)}>
+          <div className="sidebar-status-card">
+            <div className="sidebar-status-line">
+              <span className={`status-dot status-${status}`} />
+              <span>{status === 'ok' ? 'System ready' : status === 'warn' ? 'Limited mode' : 'Attention needed'}</span>
+            </div>
+            <p>{statusDetail}</p>
+          </div>
+          <Button kind="ghost" size="sm" className="sidebar-settings-btn" renderIcon={Settings} onClick={() => setSettingsOpen(true)}>
             Settings
           </Button>
-          <div className="sidebar-status-line">
-            <span className={`status-dot status-${status}`} />
-            <span>{statusDetail}</span>
-          </div>
         </div>
       </aside>
 
@@ -493,17 +551,23 @@ export default function App() {
               size="sm"
               hasIconOnly
               renderIcon={Menu}
-              iconDescription="Toggle Sidebar"
+              // iconDescription="Toggle Sidebar"
               className="sidebar-toggle-btn"
               onClick={() => setSidebarOpen((current) => !current)}
             />
-            <div>
+            <div className="header-title-group">
               <p className="eyebrow">Local inference</p>
               <h2>{activeConversation ? conversationTitle(activeConversation) : 'New chat'}</h2>
+              <p className="conversation-subtitle">
+                {messages.length} message{messages.length === 1 ? '' : 's'}
+              </p>
             </div>
           </div>
 
           <div className="header-controls">
+            <Button kind="ghost" size="sm" className="theme-toggle-btn" onClick={handleThemeToggle}>
+              {theme === 'dark' ? 'Light mode' : 'Dark mode'}
+            </Button>
             <Tag type={statusTagType(status)}>
               {status === 'ok' ? 'Ready' : status === 'warn' ? 'Limited' : 'Offline'}
             </Tag>
@@ -511,80 +575,86 @@ export default function App() {
               id="model-select"
               labelText="Model"
               hideLabel
-              value={selectedModel}
-              onChange={(event) => setSelectedModel(event.target.value)}
+              value={selectedModel.toUpperCase()}
+              onChange={(event) => setSelectedModel(event.target.value.toUpperCase())}
               size="sm"
             >
               {models.length === 0 && <SelectItem text="Loading models..." value="" />}
               {models.map((model) => (
-                <SelectItem key={model.name} text={model.name} value={model.name} />
+                <SelectItem key={model.name.toUpperCase()} text={model.name.toUpperCase()} value={model.name.toUpperCase()} />
               ))}
             </Select>
           </div>
         </header>
 
-        <section className="status-grid">
-          <Tile className="status-card">
-            <p className="status-label">Backend</p>
-            <div className="status-value">
-              {status === 'ok' ? <CheckmarkFilled /> : <WarningFilled />}
-              <span>{status === 'ok' ? 'Connected' : 'Attention needed'}</span>
-            </div>
-          </Tile>
-
-          <Tile className="status-card">
-            <p className="status-label">Model</p>
-            <div className="status-value">
-              <span>{modelSummary?.name || 'No model selected'}</span>
-            </div>
-            <p className="status-caption">{modelSummary ? formatModelSize(modelSummary) : 'Load a model to begin'}</p>
-          </Tile>
-
-          <Tile className="status-card">
-            <p className="status-label">Conversations</p>
-            <div className="status-value">
-              <span>{conversations.length}</span>
-            </div>
-            <p className="status-caption">Saved locally in your database</p>
-          </Tile>
-        </section>
-
-        <section className="chat-panel">
-          {errorMessage && (
-            <div className="error-banner" role="alert">
-              <WarningFilled />
-              <span>{errorMessage}</span>
-            </div>
-          )}
-
-          <div className="message-stream">
-            {messages.length === 0 ? <EmptyState /> : messages.map((message) => <MessageBubble key={message.id} message={message} />)}
-            <div ref={messagesEndRef} />
-          </div>
-
-          <div className="composer-panel">
-            <TextArea
-              id="composer"
-              labelText="Write a message"
-              hideLabel
-              placeholder="Ask something, paste code, or describe the task..."
-              value={composerValue}
-              onChange={(event) => setComposerValue(event.target.value)}
-              onKeyDown={handleComposerKeyDown}
-              rows={4}
-            />
-
-            <div className="composer-actions">
-              <div className="composer-hint">
-                <span>Enter to send</span>
-                <span>Shift+Enter for a new line</span>
+        <div className="workspace-content">
+          <section className="status-grid">
+            <Tile className="status-card">
+              <p className="status-label">Backend</p>
+              <div className="status-value">
+                {status === 'ok' ? <CheckmarkFilled /> : <WarningFilled />}
+                <span>{status === 'ok' ? 'Connected' : 'Attention needed'}</span>
               </div>
-              <Button kind="primary" renderIcon={Send} disabled={!composerValue.trim() || sending} onClick={handleSend}>
-                {sending ? 'Sending' : 'Send'}
-              </Button>
+            </Tile>
+
+            <Tile className="status-card">
+              <p className="status-label">Model</p>
+              <div className="status-value">
+                <span>{modelSummary?.name.toUpperCase() || 'No model selected'}</span>
+              </div>
+              <p className="status-caption">{modelSummary ? formatModelSize(modelSummary) : 'Load a model to begin'}</p>
+            </Tile>
+
+            <Tile className="status-card">
+              <p className="status-label">Conversations</p>
+              <div className="status-value">
+                <span>{conversations.length}</span>
+              </div>
+              <p className="status-caption">Saved locally in your database</p>
+            </Tile>
+          </section>
+
+          <section className="chat-panel">
+            {errorMessage && (
+              <div className="error-banner" role="alert">
+                <WarningFilled />
+                <span>{errorMessage}</span>
+              </div>
+            )}
+
+            <div className="message-stream">
+              {messages.length === 0 ? (
+                <EmptyState />
+              ) : (
+                messages.map((message) => <MessageBubble key={message.id} message={message} />)
+              )}
+              <div ref={messagesEndRef} />
             </div>
-          </div>
-        </section>
+
+            <div className="composer-panel">
+              <TextArea
+                id="composer"
+                labelText="Write a message"
+                hideLabel
+                placeholder="Ask something, paste code, or describe the task..."
+                value={composerValue}
+                onChange={(event) => setComposerValue(event.target.value)}
+                onKeyDown={handleComposerKeyDown}
+                rows={4}
+              />
+
+              <div className="composer-actions">
+                <div className="composer-hint">
+                  <span>Enter to send</span>
+                  <span>Shift+Enter for a new line</span>
+                </div>
+                <Button kind="primary" renderIcon={Send} disabled={!composerValue.trim() || sending} onClick={handleSend}>
+                  {sending ? 'Sending' : 'Send'}
+                </Button>
+              </div>
+            </div>
+          </section>
+        </div>
       </main>
 
       {settingsOpen && (

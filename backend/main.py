@@ -11,13 +11,12 @@ Endpoints:
 """
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import inspect
 
 try:
-    from .database import engine, Base
+    from .database import ensure_indexes
     from .routers import chat, conversations, health
 except ImportError:
-    from database import engine, Base
+    from database import ensure_indexes
     from routers import chat, conversations, health
 
 app = FastAPI(title="Ollama Chat", version="0.1.0")
@@ -38,11 +37,9 @@ app.include_router(conversations.router, prefix="/api/conversations")
 
 @app.on_event("startup")
 async def startup():
-    """Create database tables and log the current schema."""
-    Base.metadata.create_all(bind=engine)
-    inspector = inspect(engine)
-    tables = inspector.get_table_names()
-    print(f"Database tables: {tables}")
+    """Create MongoDB indexes used by the chat history queries."""
+    ensure_indexes()
+    print("MongoDB indexes ensured")
 
 
 @app.get("/health")
