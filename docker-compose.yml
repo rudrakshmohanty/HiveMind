@@ -1,4 +1,13 @@
 services:
+  mongo:
+    image: mongo:7
+    container_name: ollama-chat-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    restart: unless-stopped
+
   ollama:
     image: ollama/ollama:latest
     container_name: ollama-service
@@ -18,9 +27,11 @@ services:
       - "8000:8000"
     depends_on:
       - ollama
+      - mongo
     environment:
       - OLLAMA_BASE_URL=http://ollama:11434
-      - DATABASE_URL=sqlite:///./chat.db
+      - MONGODB_URL=${MONGODB_URL:-mongodb://mongo:27017}
+      - MONGODB_DB=${MONGODB_DB:-ollama_chat}
     volumes:
       - ./backend:/app
     command: bash -c "pip install -r /app/requirements.txt && uvicorn main:app --host 0.0.0.0 --port 8000"
@@ -42,3 +53,4 @@ services:
 
 volumes:
   ollama_models:
+  mongo_data:

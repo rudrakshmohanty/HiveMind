@@ -1,21 +1,25 @@
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, declarative_base
-from dotenv import load_dotenv
 import os
+
+from dotenv import load_dotenv
+from pymongo import MongoClient
 
 load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./chat.db")
+MONGODB_URL = os.getenv("MONGODB_URL")
+MONGODB_DB = os.getenv("MONGODB_DB", "ollama-idea-test")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+client = MongoClient(MONGODB_URL, serverSelectionTimeoutMS=5000)
+db = client[MONGODB_DB]
+
+conversations_collection = db["conversations"]
+messages_collection = db["messages"]
+
+
+def ensure_indexes() -> None:
+    conversations_collection.create_index("updated_at")
+    messages_collection.create_index([("conversation_id", 1), ("created_at", 1)])
 
 
 def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+    yield db

@@ -1,106 +1,137 @@
 import uuid
 from datetime import datetime
 from typing import Optional
-from sqlalchemy.orm import Session
 
 try:
-    from ..models import Conversation, Message
-    from ..database import SessionLocal
+    from ..database import conversations_collection, messages_collection
 except ImportError:
-    from models import Conversation, Message
-    from database import SessionLocal
+    from database import conversations_collection, messages_collection
 
 
-def create_conversation(db: Session, title: str = "New Chat", model: str = "mistral",
-                        temperature: float = 0.7, top_p: float = 0.9, max_tokens: int = 512) -> Conversation:
+def _serialize_conversation(doc: dict) -> dict:
+    return {
+        "id": str(doc["_id"]),
+        "title": doc.get("title", "New Chat"),
+        "model_name": doc.get("model_name", "mistral"),
+        "temperature": doc.get("temperature", 0.7),
+        "top_p": doc.get("top_p", 0.9),
+        "max_tokens": doc.get("max_tokens", 512),
+        "created_at": doc.get("created_at"),
+        "updated_at": doc.get("updated_at"),
+        "archived": doc.get("archived", False),
+    }
+
+
+def _serialize_message(doc: dict) -> dict:
+    return {
+        "id": str(doc["_id"]),
+        "conversation_id": doc.get("conversation_id"),
+        "role": doc.get("role"),
+        "content": doc.get("content", ""),
+        "model": doc.get("model", "mistral"),
+        "tokens_used": doc.get("tokens_used", 0),
+        "response_time_ms": doc.get("response_time_ms"),
+        "created_at": doc.get("created_at"),
+    }
+
+
+def create_conversation(db, title: str = "New Chat", model: str = "mistral",
+                        temperature: float = 0.7, top_p: float = 0.9, max_tokens: int = 512) -> dict:
     conv_id = str(uuid.uuid4())
-    conv = Conversation(
-        id=conv_id,
-        title=title,
-        model_name=model,
-        temperature=temperature,
-        top_p=top_p,
-        max_tokens=max_tokens,
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
-    )
-    db.add(conv)
-    db.commit()
-    db.refresh(conv)
-    return conv
+    now = datetime.utcnow()
+    conv_doc = {
+        "_id": conv_id,
+        "title": title,
+        "model_name": model,
+        "temperature": temperature,
+        "top_p": top_p,
+        "max_tokens": max_tokens,
+        "created_at": now,
+        "updated_at": now,
+        "archived": False,
+    }
+    conversations_collection.insert_one(conv_doc)
+    return _serialize_conversation(conv_doc)
 
 
-def add_message(db: Session, conversation_id: str, role: str, content: str,
-                model: str, tokens_used: int = 0, response_time_ms: float = None) -> Message:
+def add_message(db, conversation_id: str, role: str, content: str,
+                model: str, tokens_used: int = 0, response_time_ms: float = None) -> dict:
     msg_id = str(uuid.uuid4())
-    msg = Message(
-        id=msg_id,
-        conversation_id=conversation_id,
-        role=role,
-        content=content,
-        model=model,
-        tokens_used=tokens_used,
-        response_time_ms=response_time_ms,
-        created_at=datetime.utcnow(),
+    now = datetime.utcnow()
+    msg_doc = {
+        "_id": msg_id,
+        "conversation_id": conversation_id,
+        "role": role,
+        "content": content,
+        "model": model,
+        "tokens_used": tokens_used,
+        "response_time_ms": response_time_ms,
+        "created_at": now,
+    }
+    messages_collection.insert_one(msg_doc)
+    conversations_collection.update_one(
+        {"_id": conversation_id},
+        {"$set": {"updated_at": now}},
     )
-    db.add(msg)
-    # Update conversation's updated_at
-    conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
-    if conv:
-        conv.updated_at = datetime.utcnow()
-    db.commit()
-    db.refresh(msg)
-    return msg
+    return _serialize_message(msg_doc)
 
 
-def get_conversation(db: Session, conv_id: str) -> Optional[Conversation]:
-    return db.query(Conversation).filter(Conversation.id == conv_id).first()
+def get_conversation(db, conv_id: str) -> Optional[dict]:
+    conv = conversations_collection.find_one({"_id": conv_id})
+    return _serialize_conversation(conv) if conv else None
 
 
-def list_conversations(db: Session, limit: int = 50) -> list[Conversation]:
-    return db.query(Conversation).order_by(Conversation.updated_at.desc()).limit(limit).all()
+def list_conversations(db, limit: int = 50) -> list[dict]:
+    conversations = conversations_collection.find().sort("updated_at", -1).limit(limit)
+    result = []
+    for conv in conversations:
+        conv_data = _serialize_conversation(conv)
+        conv_data["message_count"] = messages_collection.count_documents({"conversation_id": conv_data["id"]})
+        result.append(conv_data)
+    return result
 
 
-def delete_conversation(db: Session, conv_id: str) -> bool:
-    conv = db.query(Conversation).filter(Conversation.id == conv_id).first()
-    if not conv:
+def delete_conversation(db, conv_id: str) -> bool:
+    conv_result = conversations_collection.delete_one({"_id": conv_id})
+    if conv_result.deleted_count == 0:
         return False
-    db.delete(conv)
-    db.commit()
+    messages_collection.delete_many({"conversation_id": conv_id})
     return True
 
 
-def get_conversation_messages(db: Session, conv_id: str) -> list[Message]:
-    return db.query(Message).filter(Message.conversation_id == conv_id).order_by(Message.created_at).all()
+def get_conversation_messages(db, conv_id: str) -> list[dict]:
+    messages = messages_collection.find({"conversation_id": conv_id}).sort("created_at", 1)
+    return [_serialize_message(message) for message in messages]
 
 
-def create_conversation_message_pair(db: Session, conv_id: str, user_msg: str,
+def create_conversation_message_pair(db, conv_id: str, user_msg: str,
                                       assistant_msg: str, model: str,
                                       tokens_used: int = 0, response_time_ms: float = None):
     """Add both user and assistant message in one transaction."""
-    conv = db.query(Conversation).filter(Conversation.id == conv_id).first()
+    conv = conversations_collection.find_one({"_id": conv_id})
     if not conv:
         raise ValueError(f"Conversation {conv_id} not found")
-    conv.updated_at = datetime.utcnow()
-    user_message = Message(
-        id=str(uuid.uuid4()),
-        conversation_id=conv_id,
-        role="user",
-        content=user_msg,
-        model=model,
-        created_at=datetime.utcnow(),
-    )
-    assistant_message = Message(
-        id=str(uuid.uuid4()),
-        conversation_id=conv_id,
-        role="assistant",
-        content=assistant_msg,
-        model=model,
-        tokens_used=tokens_used,
-        response_time_ms=response_time_ms,
-        created_at=datetime.utcnow(),
-    )
-    db.add(user_message)
-    db.add(assistant_message)
-    db.commit()
-    return user_message, assistant_message
+    now = datetime.utcnow()
+    conversations_collection.update_one({"_id": conv_id}, {"$set": {"updated_at": now}})
+    user_message = {
+        "_id": str(uuid.uuid4()),
+        "conversation_id": conv_id,
+        "role": "user",
+        "content": user_msg,
+        "model": model,
+        "tokens_used": 0,
+        "response_time_ms": None,
+        "created_at": now,
+    }
+    assistant_message = {
+        "_id": str(uuid.uuid4()),
+        "conversation_id": conv_id,
+        "role": "assistant",
+        "content": assistant_msg,
+        "model": model,
+        "tokens_used": tokens_used,
+        "response_time_ms": response_time_ms,
+        "created_at": now,
+    }
+    messages_collection.insert_many([user_message, assistant_message])
+    return _serialize_message(user_message), _serialize_message(assistant_message)
