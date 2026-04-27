@@ -1,10 +1,15 @@
 from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from .. import schemas, database
-from ..services import ollama_service, conversation_service
 import time
 import json
+
+try:
+    from .. import schemas, database
+    from ..services import ollama_service, conversation_service
+except ImportError:
+    import schemas, database
+    from services import ollama_service, conversation_service
 
 router = APIRouter()
 
@@ -98,38 +103,46 @@ async def send_chat_stream(request: Request):
     temperature = float(request.query_params.get("temperature", 0.7))
     top_p = float(request.query_params.get("top_p", 0.9))
 
-    db = database.SessionLocal()
-    try:
-        # Create conversation if needed
-        if not conv_id:
+    # Create or look up conversation outside the generator
+    # so we can return 404 without leaking the session
+    if not conv_id:
+        tmp_db = database.SessionLocal()
+        try:
             conv = conversation_service.create_conversation(
-                db, title=message_text[:50] or "New Chat", model=model,
+                tmp_db, title=message_text[:50] or "New Chat", model=model,
                 temperature=temperature, top_p=top_p,
             )
             conv_id = conv.id
-        else:
-            conv = conversation_service.get_conversation(db, conv_id)
-            if not conv:
-                raise HTTPException(status_code=404, detail="Conversation not found")
+        finally:
+            tmp_db.close()
+    else:
+        tmp_db = database.SessionLocal()
+        conv = conversation_service.get_conversation(tmp_db, conv_id)
+        if not conv:
+            tmp_db.close()
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        tmp_db.close()
 
-        # Get conversation history
-        history_msgs = conversation_service.get_conversation_messages(db, conv_id)
-        messages_history = [{"role": m.role, "content": m.content} for m in history_msgs]
+    # Get conversation history
+    db = database.SessionLocal()
+    history_msgs = conversation_service.get_conversation_messages(db, conv_id)
+    messages_history = [{"role": m.role, "content": m.content} for m in history_msgs]
 
-        # Add user message
-        conversation_service.add_message(db, conv_id, "user", message_text, model)
+    # Add user message
+    conversation_service.add_message(db, conv_id, "user", message_text, model)
 
-        request_data = {
-            "model": model,
-            "messages": messages_history + [{"role": "user", "content": message_text}],
-            "stream": True,
-            "options": {
-                "temperature": temperature,
-                "top_p": top_p,
-            },
-        }
+    request_data = {
+        "model": model,
+        "messages": messages_history + [{"role": "user", "content": message_text}],
+        "stream": True,
+        "options": {
+            "temperature": temperature,
+            "top_p": top_p,
+        },
+    }
 
-        async def generate():
+    async def generate():
+        try:
             content_buffer = []
             async for chunk in ollama_service.stream_chat(request_data):
                 try:
@@ -143,46 +156,54 @@ async def send_chat_stream(request: Request):
             full_response = "".join(content_buffer)
             if full_response:
                 conversation_service.add_message(db, conv_id, "assistant", full_response, model)
+        finally:
+            db.close()
 
-        return StreamingResponse(generate(), media_type="text/event-stream")
-    finally:
-        db.close()
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 @router.post("/chat/stream")
-async def send_chat_stream_post(req: schemas.ChatRequest, request: Request):
+async def send_chat_stream_post(req: schemas.ChatRequest):
     """Streaming chat via POST."""
     conv_id = req.conversation_id
     model = req.model or "mistral"
     temperature = req.temperature
     top_p = req.top_p
 
-    db = database.SessionLocal()
-    try:
-        if not conv_id:
+    # Create or look up conversation outside the generator
+    if not conv_id:
+        tmp_db = database.SessionLocal()
+        try:
             conv = conversation_service.create_conversation(
-                db, title=req.message[:50] or "New Chat", model=model,
+                tmp_db, title=req.message[:50] or "New Chat", model=model,
                 temperature=temperature, top_p=top_p,
             )
             conv_id = conv.id
-        else:
-            conv = conversation_service.get_conversation(db, conv_id)
-            if not conv:
-                raise HTTPException(status_code=404, detail="Conversation not found")
+        finally:
+            tmp_db.close()
+    else:
+        tmp_db = database.SessionLocal()
+        conv = conversation_service.get_conversation(tmp_db, conv_id)
+        if not conv:
+            tmp_db.close()
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        tmp_db.close()
 
-        history_msgs = conversation_service.get_conversation_messages(db, conv_id)
-        messages_history = [{"role": m.role, "content": m.content} for m in history_msgs]
+    # Get conversation history + add user message
+    db = database.SessionLocal()
+    history_msgs = conversation_service.get_conversation_messages(db, conv_id)
+    messages_history = [{"role": m.role, "content": m.content} for m in history_msgs]
+    conversation_service.add_message(db, conv_id, "user", req.message, model)
 
-        conversation_service.add_message(db, conv_id, "user", req.message, model)
+    request_data = {
+        "model": model,
+        "messages": messages_history + [{"role": "user", "content": req.message}],
+        "stream": True,
+        "options": {"temperature": temperature, "top_p": top_p},
+    }
 
-        request_data = {
-            "model": model,
-            "messages": messages_history + [{"role": "user", "content": req.message}],
-            "stream": True,
-            "options": {"temperature": temperature, "top_p": top_p},
-        }
-
-        async def generate():
+    async def generate():
+        try:
             content_buffer = []
             async for chunk in ollama_service.stream_chat(request_data):
                 try:
@@ -195,7 +216,7 @@ async def send_chat_stream_post(req: schemas.ChatRequest, request: Request):
             full_response = "".join(content_buffer)
             if full_response:
                 conversation_service.add_message(db, conv_id, "assistant", full_response, model)
+        finally:
+            db.close()
 
-        return StreamingResponse(generate(), media_type="text/event-stream")
-    finally:
-        db.close()
+    return StreamingResponse(generate(), media_type="text/event-stream")

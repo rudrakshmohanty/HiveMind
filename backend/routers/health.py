@@ -1,6 +1,11 @@
 from fastapi import APIRouter
-from .. import schemas
-from ..services import ollama_service
+
+try:
+    from .. import schemas
+    from ..services import ollama_service
+except ImportError:
+    import schemas
+    from services import ollama_service
 
 router = APIRouter()
 

@@ -6,3 +6,6 @@ node_modules/
 __pycache__/
 *.pyc
 .claude
+frontend/.npm-cache
+frontend/dist
+*/package-lock.json

@@ -8,6 +8,12 @@ export async function fetchModels(baseURL) {
   return resp.json();
 }
 
+export async function fetchStatus(baseURL) {
+  const resp = await fetch(`${baseURL}/status`);
+  if (!resp.ok) throw new Error('Failed to fetch status');
+  return resp.json();
+}
+
 export async function fetchConversations(baseURL) {
   const resp = await fetch(`${baseURL}/conversations`);
   if (!resp.ok) throw new Error('Failed to fetch conversations');
@@ -20,11 +26,18 @@ export async function fetchConversation(baseURL, id) {
   return resp.json();
 }
 
-export async function createConversation(baseURL, title) {
-  const resp = await fetch(`${baseURL}/conversations`, {
+export async function createConversation(baseURL, data = {}) {
+  const params = new URLSearchParams();
+
+  if (data.title !== undefined) params.set('title', data.title);
+  if (data.model !== undefined) params.set('model', data.model);
+  if (data.temperature !== undefined) params.set('temperature', String(data.temperature));
+  if (data.top_p !== undefined) params.set('top_p', String(data.top_p));
+  if (data.max_tokens !== undefined) params.set('max_tokens', String(data.max_tokens));
+
+  const query = params.toString();
+  const resp = await fetch(`${baseURL}/conversations${query ? `?${query}` : ''}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title }),
   });
   if (!resp.ok) throw new Error('Failed to create conversation');
   return resp.json();
@@ -59,5 +72,5 @@ export async function sendMessageStream(baseURL, data) {
     const text = await resp.text();
     throw new Error(`Chat error (${resp.status}): ${text}`);
   }
-  return resp.body; // readable stream
+  return resp.body;
 }

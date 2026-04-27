@@ -2,7 +2,7 @@ import os
 from typing import AsyncGenerator
 import httpx
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
 
 async def get_available_models() -> list[dict]:
@@ -30,8 +30,7 @@ async def stream_chat(request_data: dict) -> AsyncGenerator[str, None]:
             async for line in resp.aiter_lines():
                 if not line:
                     continue
-                if line.startswith("data: "):
-                    data_str = line[6:]
-                    if data_str.strip() == "{}":
-                        continue
-                    yield data_str
+                data_str = line.removeprefix("data: ").strip()
+                if not data_str or data_str == "{}":
+                    continue
+                yield data_str

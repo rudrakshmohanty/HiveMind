@@ -1,408 +1,649 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { fetchModels, fetchConversations, sendMessage, sendMessageStream, createChat } from './api';
-import './index.css';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Button,
+  Select,
+  SelectItem,
+  Tag,
+  TextArea,
+  TextInput,
+  Tile,
+} from '@carbon/react';
+import {
+  Add,
+  Chat,
+  CheckmarkFilled,
+  Menu,
+  Renew,
+  Script,
+  Search,
+  Send,
+  Settings,
+  TrashCan,
+  WarningFilled,
+} from '@carbon/icons-react';
+import {
+  createConversation,
+  deleteConversation,
+  fetchConversation,
+  fetchConversations,
+  fetchModels,
+  fetchStatus,
+  sendMessageStream,
+} from './api';
+import './index.scss';
 
 const API_BASE = '/api';
 
-function formatTime(isoStr) {
-  if (!isoStr) return '';
-  const d = new Date(isoStr);
-  const now = new Date();
-  const diff = now - d;
-  if (diff < 60_000) return 'now';
-  if (diff < 3600_000) return `${Math.floor(diff / 60_000)}m`;
-  if (diff < 86_400_000) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+const DEFAULT_SETTINGS = {
+  temperature: 0.7,
+  topP: 0.9,
+  maxTokens: 1024,
+};
+
+function formatTime(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+
+  const delta = Date.now() - date.getTime();
+  if (delta < 60_000) return 'now';
+  if (delta < 3_600_000) return `${Math.max(1, Math.floor(delta / 60_000))}m`;
+  if (delta < 86_400_000) {
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+function formatModelSize(model) {
+  const rawSize = model.parameter_size ?? model.size;
+  if (!rawSize) return 'local';
+  if (typeof rawSize === 'string') return rawSize;
+  if (rawSize >= 1_000_000_000) return `${(rawSize / 1_000_000_000).toFixed(1)}B`;
+  if (rawSize >= 1_000_000) return `${(rawSize / 1_000_000).toFixed(1)}M`;
+  return String(rawSize);
+}
+
+function conversationTitle(conversation) {
+  return conversation.title?.trim() || 'New chat';
+}
+
+function statusTagType(status) {
+  if (status === 'ok') return 'green';
+  if (status === 'warn') return 'yellow';
+  return 'red';
 }
 
 function MessageBubble({ message }) {
-  const { role, content } = message;
-
-  // Simple markdown-like rendering
-  const rendered = content
-    .replace(/```(\w*)\n?([\s\S]*?)```/g, '<pre><code>$2</code></pre>')
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-    .replace(/\n/g, '<br/>');
+  const isUser = message.role === 'user';
 
   return (
-    <div className={`message ${role}`}>
-      <div className="message-avatar">
-        {role === 'user' ? '👤' : '🤖'}
+    <article className={`bubble ${isUser ? 'bubble-user' : 'bubble-assistant'}`}>
+      <div className="bubble-avatar" aria-hidden="true">
+        {isUser ? <Chat /> : <Script />}
       </div>
-      <div className="message-content" dangerouslySetInnerHTML={{ __html: rendered }} />
-    </div>
+      <div className="bubble-body">
+        <div className="bubble-meta">
+          <span>{isUser ? 'You' : message.model || 'Assistant'}</span>
+          <span>{formatTime(message.created_at)}</span>
+        </div>
+        <div className="bubble-content">{message.content}</div>
+      </div>
+    </article>
   );
 }
 
-function LoadingDots() {
+function EmptyState() {
   return (
-    <div className="message assistant">
-      <div className="message-avatar">🤖</div>
-      <div className="message-content">
-        <div className="loading-dots">
-          <span></span><span></span><span></span>
-        </div>
+    <div className="empty-state">
+      <div className="empty-state-icon">
+        <Chat />
       </div>
+      <h2>Start a private conversation</h2>
+      <p>Choose a model, write a prompt, and let the local Ollama backend handle the rest.</p>
     </div>
   );
 }
 
 export default function App() {
   const [conversations, setConversations] = useState([]);
-  const [activeConvId, setActiveConvId] = useState(null);
-  const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState('');
   const [models, setModels] = useState([]);
+  const [messages, setMessages] = useState([]);
+  const [activeConversationId, setActiveConversationId] = useState(null);
   const [selectedModel, setSelectedModel] = useState('mistral');
+  const [composerValue, setComposerValue] = useState('');
   const [status, setStatus] = useState('loading');
-  const [showSettings, setShowSettings] = useState(false);
-  const [settings, setSettings] = useState({ temperature: 0.7, top_p: 0.9, maxTokens: 4096 });
+  const [statusDetail, setStatusDetail] = useState('Checking backend');
+  const [searchTerm, setSearchTerm] = useState('');
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sending, setSending] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
+  const [settings, setSettings] = useState(() => {
+    const stored = window.localStorage.getItem('ollama-chat-settings');
+    return stored ? { ...DEFAULT_SETTINGS, ...JSON.parse(stored) } : DEFAULT_SETTINGS;
+  });
 
   const messagesEndRef = useRef(null);
-  const textareaRef = useRef(null);
 
-  const loadModels = useCallback(async () => {
-    try {
-      const data = await fetchModels(API_BASE);
-      setModels(data.models || []);
-      if (data.models.length > 0 && !selectedModel) {
-        setSelectedModel(data.models[0].name);
+  const focusComposer = () => {
+    document.getElementById('composer')?.focus();
+  };
+
+  const activeConversation = useMemo(
+    () => conversations.find((conversation) => conversation.id === activeConversationId) || null,
+    [conversations, activeConversationId],
+  );
+
+  const filteredConversations = useMemo(() => {
+    const term = searchTerm.trim().toLowerCase();
+    if (!term) return conversations;
+    return conversations.filter((conversation) => conversationTitle(conversation).toLowerCase().includes(term));
+  }, [conversations, searchTerm]);
+
+  const persistSettings = (nextSettings) => {
+    setSettings(nextSettings);
+    window.localStorage.setItem('ollama-chat-settings', JSON.stringify(nextSettings));
+  };
+
+  const refreshConversations = async () => {
+    const data = await fetchConversations(API_BASE);
+    setConversations(data || []);
+  };
+
+  const refreshModels = async () => {
+    const data = await fetchModels(API_BASE);
+    const availableModels = data.models || [];
+    setModels(availableModels);
+    if (availableModels.length > 0 && !availableModels.some((model) => model.name === selectedModel)) {
+      setSelectedModel(availableModels[0].name);
+    }
+  };
+
+  const refreshStatus = async () => {
+    const data = await fetchStatus(API_BASE);
+    const ollamaState = data.ollama || 'error';
+    setStatus(ollamaState === 'ok' ? 'ok' : ollamaState === 'no_models' ? 'warn' : 'error');
+    setStatusDetail(
+      ollamaState === 'ok'
+        ? 'Backend and Ollama are ready'
+        : ollamaState === 'no_models'
+          ? 'Backend is up, no Ollama models are loaded'
+          : 'Backend or Ollama is unavailable',
+    );
+  };
+
+  const syncConversation = async (conversationId) => {
+    const detail = await fetchConversation(API_BASE, conversationId);
+    setMessages(detail.messages || []);
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const load = async () => {
+      try {
+        await Promise.all([refreshModels(), refreshConversations(), refreshStatus()]);
+        if (!cancelled) setErrorMessage('');
+      } catch (error) {
+        if (!cancelled) {
+          setStatus('error');
+          setStatusDetail('Unable to reach the backend');
+          setErrorMessage(error instanceof Error ? error.message : 'Unable to load app data');
+        }
       }
-    } catch (e) {
-      setStatus('error');
-    }
-  }, [selectedModel]);
+    };
 
-  const loadConversations = useCallback(async () => {
-    try {
-      const data = await fetchConversations(API_BASE);
-      setConversations(data);
-    } catch (e) {
-      // Silently fail — sidebar stays empty
-    }
+    load();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  // Initial data fetch
-  useEffect(() => {
-    loadModels();
-    loadConversations();
-    // Check health
-    (async () => {
-      try {
-        const resp = await fetch(`${API_BASE}/health`);
-        if (!resp.ok) setStatus('error');
-        else setStatus('ok');
-      } catch {
-        setStatus('error');
-      }
-    })();
-  }, [loadModels, loadConversations]);
-
-  // Load conversation when switching
-  useEffect(() => {
-    setMessages([]);
-  }, [activeConvId]);
-
-  // Auto-scroll messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Auto-resize textarea
   useEffect(() => {
-    const ta = textareaRef.current;
-    if (!ta) return;
-    ta.style.height = 'auto';
-    ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
-  }, [input]);
+    const keyHandler = (event) => {
+      if (event.key === 'Escape' && settingsOpen) {
+        setSettingsOpen(false);
+      }
+    };
 
-  const handleNewChat = () => {
-    setActiveConvId(null);
-    setMessages([]);
-    textareaRef.current?.focus();
+    window.addEventListener('keydown', keyHandler);
+    return () => window.removeEventListener('keydown', keyHandler);
+  }, [settingsOpen]);
+
+  const handleNewConversation = async () => {
+    try {
+      const title = composerValue.trim().slice(0, 50) || 'New chat';
+      const conversation = await createConversation(API_BASE, {
+        title,
+        model: selectedModel,
+        temperature: settings.temperature,
+        top_p: settings.topP,
+        max_tokens: settings.maxTokens,
+      });
+
+      setConversations((current) => [conversation, ...current.filter((item) => item.id !== conversation.id)]);
+      setActiveConversationId(conversation.id);
+      setMessages([]);
+      setSidebarOpen(false);
+      focusComposer();
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Unable to create conversation');
+    }
   };
 
-  const handleSelectConversation = async (id) => {
-    setActiveConvId(id);
-    setMessages([]);
+  const handleSelectConversation = async (conversationId) => {
+    setActiveConversationId(conversationId);
+    setSidebarOpen(false);
+    setErrorMessage('');
 
-    // Fetch conversation messages
-    const resp = await fetch(`${API_BASE}/conversations/${id}`);
-    if (!resp.ok) return;
-    const data = await resp.json();
-    setActiveConvId(id);
-    setMessages(data.messages || []);
-  };
-
-  const handleDeleteConversation = async (e, id) => {
-    e.stopPropagation();
-    await fetch(`${API_BASE}/conversations/${id}`, { method: 'DELETE' });
-    setConversations(prev => prev.filter(c => c.id !== id));
-    if (activeConvId === id) {
-      setActiveConvId(null);
+    try {
+      await syncConversation(conversationId);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Unable to load conversation');
       setMessages([]);
     }
   };
 
-  const handleSend = async () => {
-    if (!input.trim()) return;
-
-    const userMsg = {
-      id: Date.now().toString(),
-      role: 'user',
-      content: input.trim(),
-      model: selectedModel,
-      created_at: new Date().toISOString(),
-      conversation_id: activeConvId,
-    };
-
-    setMessages(prev => [...prev, userMsg]);
-    const currentInput = input.trim();
-    setInput('');
-    setShowSettings(false);
+  const handleDeleteConversation = async (event, conversationId) => {
+    event.stopPropagation();
 
     try {
-      const resp = await sendMessageStream(
-        API_BASE,
-        {
-          message: currentInput,
-          model: selectedModel,
-          temperature: settings.temperature,
-          top_p: settings.top_p,
-          max_tokens: settings.maxTokens,
-          conversation_id: activeConvId,
-        }
-      );
+      await deleteConversation(API_BASE, conversationId);
+      setConversations((current) => current.filter((conversation) => conversation.id !== conversationId));
+      if (activeConversationId === conversationId) {
+        setActiveConversationId(null);
+        setMessages([]);
+      }
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Unable to delete conversation');
+    }
+  };
 
-      // Streaming response
-      let assistantMsgId = null;
-      let contentParts = [];
+  const ensureConversation = async (messageText) => {
+    if (activeConversationId) return activeConversationId;
 
-      const assistantMsg = {
-        id: 'streaming',
+    const conversation = await createConversation(API_BASE, {
+      title: messageText.slice(0, 50) || 'New chat',
+      model: selectedModel,
+      temperature: settings.temperature,
+      top_p: settings.topP,
+      max_tokens: settings.maxTokens,
+    });
+
+    setConversations((current) => [conversation, ...current.filter((item) => item.id !== conversation.id)]);
+    setActiveConversationId(conversation.id);
+    return conversation.id;
+  };
+
+  const handleSend = async () => {
+    const text = composerValue.trim();
+    if (!text || sending) return;
+
+    setSending(true);
+    setErrorMessage('');
+    setSettingsOpen(false);
+    setComposerValue('');
+
+    let conversationId;
+
+    try {
+      conversationId = await ensureConversation(text);
+
+      const userMessage = {
+        id: `${Date.now()}-user`,
+        role: 'user',
+        content: text,
+        model: selectedModel,
+        created_at: new Date().toISOString(),
+        conversation_id: conversationId,
+      };
+
+      const assistantSeed = {
+        id: 'streaming-assistant',
         role: 'assistant',
         content: '',
         model: selectedModel,
         created_at: new Date().toISOString(),
-        conversation_id: activeConvId,
+        conversation_id: conversationId,
       };
 
-      setMessages(prev => [...prev, assistantMsg]);
+      setMessages((current) => [...current, userMessage, assistantSeed]);
 
-      const reader = resp.getReader();
+      const stream = await sendMessageStream(API_BASE, {
+        conversation_id: conversationId,
+        message: text,
+        model: selectedModel,
+        temperature: settings.temperature,
+        top_p: settings.topP,
+        max_tokens: settings.maxTokens,
+      });
+
+      if (!stream) {
+        throw new Error('Streaming response is unavailable');
+      }
+
+      const reader = stream.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      let assistantContent = '';
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
+        const frames = buffer.split('\n\n');
+        buffer = frames.pop() || '';
 
-        // Process SSE chunks
-        const lines = buffer.split('\n');
-        buffer = lines.pop(); // Keep incomplete line
+        for (const frame of frames) {
+          const eventLine = frame.split('\n').find((line) => line.startsWith('data: '));
+          if (!eventLine) continue;
 
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
           try {
-            const data = JSON.parse(line.slice(6));
-            contentParts.push(data.content);
-            setMessages(prev => {
-              const last = prev[prev.length - 1];
-              if (last.id === 'streaming') {
-                return [...prev.slice(0, -1), { ...last, content: contentParts.join('') }];
-              }
-              return prev;
+            const payload = JSON.parse(eventLine.slice(6));
+            if (!payload.content) continue;
+            assistantContent += payload.content;
+            setMessages((current) => {
+              const next = [...current];
+              const streamIndex = next.findIndex((item) => item.id === 'streaming-assistant');
+              if (streamIndex === -1) return current;
+              next[streamIndex] = { ...next[streamIndex], content: assistantContent };
+              return next;
             });
           } catch {
-            // Skip malformed chunks
+            continue;
           }
         }
       }
 
-      // Final message
-      const fullContent = contentParts.join('');
-      assistantMsgId = Date.now().toString();
-      setMessages(prev => {
-        const last = prev[prev.length - 1];
-        if (last.id === 'streaming') {
-          return [...prev.slice(0, -1), { ...last, id: assistantMsgId, content: fullContent }];
+      await Promise.all([refreshConversations(), syncConversation(conversationId)]);
+      setActiveConversationId(conversationId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to send message';
+      setErrorMessage(message);
+      setMessages((current) => {
+        const next = [...current];
+        const streamIndex = next.findIndex((item) => item.id === 'streaming-assistant');
+        if (streamIndex !== -1) {
+          next[streamIndex] = {
+            ...next[streamIndex],
+            content: `Error: ${message}`,
+          };
         }
-        return prev;
+        return next;
       });
-
-      // Update conversation list
-      loadConversations();
-    } catch (e) {
-      setMessages(prev => {
-        const last = prev[prev.length - 1];
-        if (last.id === 'streaming') {
-          return [...prev.slice(0, -1), { ...last, content: 'Error: ' + e.message }];
-        }
-        return prev;
-      });
+    } finally {
+      setSending(false);
+      focusComposer();
     }
   };
 
-  const handleKeyDown = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
+  const handleComposerKeyDown = (event) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
       handleSend();
     }
   };
 
   const handleSettingsSave = () => {
-    setShowSettings(false);
+    persistSettings(settings);
+    setSettingsOpen(false);
   };
 
-  const activeConvTitle = conversations.find(c => c.id === activeConvId)?.title || '';
+  const modelSummary = models.find((model) => model.name === selectedModel) || models[0] || null;
 
   return (
-    <div className="app-container">
-      {/* Sidebar */}
-      <div className="sidebar">
-        <div className="sidebar-header">
-          <h2>💬 Ollama Chat</h2>
-          <button className="new-chat-btn" onClick={handleNewChat}>
-            <span>+</span> New Chat
-          </button>
-        </div>
-        <div className="conversation-list">
-          {conversations.length === 0 && (
-            <div style={{ padding: '20px 12px', color: 'var(--text-secondary)', fontSize: '14px', textAlign: 'center' }}>
-              No conversations yet
-            </div>
-          )}
-          {conversations.map(c => (
-            <div
-              key={c.id}
-              className={`conversation-item ${activeConvId === c.id ? 'active' : ''}`}
-              onClick={() => handleSelectConversation(c.id)}
-            >
-              <span className="conversation-item-title">{c.title}</span>
-              <span className="conversation-item-time">{formatTime(c.updated_at)}</span>
-              <button className="conversation-item-delete" onClick={(e) => handleDeleteConversation(e, c.id)}>
-                ✕
-              </button>
-            </div>
-          ))}
-        </div>
-        <div className="sidebar-footer">
-          <button onClick={() => setShowSettings(true)}>⚙️ Settings</button>
-          <button onClick={loadModels}>🔄 Refresh</button>
-        </div>
-      </div>
+    <div className={`app-shell ${sidebarOpen ? 'sidebar-open' : 'sidebar-closed'}`}>
+      <aside className="sidebar">
+        <div className="sidebar-brand">
+          <div className="brand-copy">
+            <p className="eyebrow">Self-hosted AI workspace</p>
+            <h1>Ollama Chat</h1>
+            <p>Carbon UI, local models, and conversation history in one place.</p>
+          </div>
 
-      {/* Main area */}
-      <div className="main-content">
-        <div className="chat-header">
-          <select
-            className="model-selector"
-            value={selectedModel}
-            onChange={(e) => setSelectedModel(e.target.value)}
-            disabled={status !== 'ok'}
-          >
-            {models.length === 0 && <option value="">Loading models...</option>}
-            {models.map(m => (
-              <option key={m.name} value={m.name}>{m.name}</option>
-            ))}
-          </select>
-
-          {activeConvTitle && (
-            <span style={{ fontSize: '14px', color: 'var(--text-secondary)', marginLeft: '8px' }}>
-              — {activeConvTitle}
-            </span>
-          )}
-
-          <div className={`status-indicator ${status === 'loading' ? 'loading' : status === 'ok' ? 'ok' : 'error'}`} />
-        </div>
-
-        <div className="messages-area">
-          {messages.length === 0 ? (
-            <div className="empty-state">
-              <div className="empty-state-icon">💬</div>
-              <h3>Welcome to Ollama Chat</h3>
-              <p>Send a message to start a new conversation</p>
-            </div>
-          ) : (
-            messages.map(m => <MessageBubble key={m.id} message={m} />)
-          )}
-          {status === 'error' && messages.length === 0 && (
-            <div style={{ textAlign: 'center', color: 'var(--danger)', padding: 20 }}>
-              <p>⚠️ Cannot connect to Ollama. Make sure Ollama is running.</p>
-            </div>
-          )}
-          <div ref={messagesEndRef} />
-        </div>
-
-        <div className="input-area">
-          <div className="input-wrapper">
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Type your message... (Shift+Enter for newline)"
-              rows={1}
-            />
-            <button
-              className="send-btn"
-              onClick={handleSend}
-              disabled={!input.trim()}
-            >
-              ➤
-            </button>
+          <div className="sidebar-brand-actions">
+            <Button kind="primary" renderIcon={Add} size="sm" onClick={handleNewConversation}>
+              New chat
+            </Button>
+            <Button kind="tertiary" renderIcon={Renew} size="sm" onClick={refreshModels}>
+              Refresh
+            </Button>
           </div>
         </div>
-      </div>
 
-      {/* Settings Modal */}
-      {showSettings && (
-        <div className="modal-overlay" onClick={() => setShowSettings(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>⚙️ Chat Settings</h3>
+        <div className="sidebar-search">
+          <TextInput
+            id="conversation-search"
+            labelText="Search conversations"
+            hideLabel
+            placeholder="Search conversations"
+            value={searchTerm}
+            onChange={(event) => setSearchTerm(event.target.value)}
+            size="sm"
+            renderIcon={Search}
+          />
+        </div>
 
-            <div className="setting-group">
-              <label>Temperature ({settings.temperature})</label>
-              <input
-                type="range"
-                min="0"
-                max="2"
-                step="0.1"
-                value={settings.temperature}
-                onChange={(e) => setSettings(s => ({ ...s, temperature: parseFloat(e.target.value) }))}
-              />
+        <div className="conversation-stack">
+          {filteredConversations.length === 0 ? (
+            <div className="sidebar-empty">
+              <p>No conversations yet.</p>
+            </div>
+          ) : (
+            filteredConversations.map((conversation) => {
+              const isActive = conversation.id === activeConversationId;
+              return (
+                <div
+                  key={conversation.id}
+                  className={`conversation-card ${isActive ? 'conversation-card-active' : ''}`}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => handleSelectConversation(conversation.id)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      handleSelectConversation(conversation.id);
+                    }
+                  }}
+                >
+                  <div className="conversation-card-main">
+                    <div className="conversation-card-title">{conversationTitle(conversation)}</div>
+                    <div className="conversation-card-meta">
+                      <span>{conversation.message_count ?? 0} messages</span>
+                      <span>{formatTime(conversation.updated_at)}</span>
+                    </div>
+                  </div>
+                  <Button
+                    kind="ghost"
+                    size="sm"
+                    hasIconOnly
+                    renderIcon={TrashCan}
+                    iconDescription={`Delete ${conversationTitle(conversation)}`}
+                    onClick={(event) => handleDeleteConversation(event, conversation.id)}
+                  />
+                </div>
+              );
+            })
+          )}
+        </div>
+
+        <div className="sidebar-footer">
+          <Button kind="ghost" size="sm" renderIcon={Settings} onClick={() => setSettingsOpen(true)}>
+            Settings
+          </Button>
+          <div className="sidebar-status-line">
+            <span className={`status-dot status-${status}`} />
+            <span>{statusDetail}</span>
+          </div>
+        </div>
+      </aside>
+
+      <main className="workspace">
+        <header className="workspace-header">
+          <div className="header-left">
+            <Button
+              kind="ghost"
+              size="sm"
+              hasIconOnly
+              renderIcon={Menu}
+              iconDescription="Toggle Sidebar"
+              className="sidebar-toggle-btn"
+              onClick={() => setSidebarOpen((current) => !current)}
+            />
+            <div>
+              <p className="eyebrow">Local inference</p>
+              <h2>{activeConversation ? conversationTitle(activeConversation) : 'New chat'}</h2>
+            </div>
+          </div>
+
+          <div className="header-controls">
+            <Tag type={statusTagType(status)}>
+              {status === 'ok' ? 'Ready' : status === 'warn' ? 'Limited' : 'Offline'}
+            </Tag>
+            <Select
+              id="model-select"
+              labelText="Model"
+              hideLabel
+              value={selectedModel}
+              onChange={(event) => setSelectedModel(event.target.value)}
+              size="sm"
+            >
+              {models.length === 0 && <SelectItem text="Loading models..." value="" />}
+              {models.map((model) => (
+                <SelectItem key={model.name} text={model.name} value={model.name} />
+              ))}
+            </Select>
+          </div>
+        </header>
+
+        <section className="status-grid">
+          <Tile className="status-card">
+            <p className="status-label">Backend</p>
+            <div className="status-value">
+              {status === 'ok' ? <CheckmarkFilled /> : <WarningFilled />}
+              <span>{status === 'ok' ? 'Connected' : 'Attention needed'}</span>
+            </div>
+          </Tile>
+
+          <Tile className="status-card">
+            <p className="status-label">Model</p>
+            <div className="status-value">
+              <span>{modelSummary?.name || 'No model selected'}</span>
+            </div>
+            <p className="status-caption">{modelSummary ? formatModelSize(modelSummary) : 'Load a model to begin'}</p>
+          </Tile>
+
+          <Tile className="status-card">
+            <p className="status-label">Conversations</p>
+            <div className="status-value">
+              <span>{conversations.length}</span>
+            </div>
+            <p className="status-caption">Saved locally in your database</p>
+          </Tile>
+        </section>
+
+        <section className="chat-panel">
+          {errorMessage && (
+            <div className="error-banner" role="alert">
+              <WarningFilled />
+              <span>{errorMessage}</span>
+            </div>
+          )}
+
+          <div className="message-stream">
+            {messages.length === 0 ? <EmptyState /> : messages.map((message) => <MessageBubble key={message.id} message={message} />)}
+            <div ref={messagesEndRef} />
+          </div>
+
+          <div className="composer-panel">
+            <TextArea
+              id="composer"
+              labelText="Write a message"
+              hideLabel
+              placeholder="Ask something, paste code, or describe the task..."
+              value={composerValue}
+              onChange={(event) => setComposerValue(event.target.value)}
+              onKeyDown={handleComposerKeyDown}
+              rows={4}
+            />
+
+            <div className="composer-actions">
+              <div className="composer-hint">
+                <span>Enter to send</span>
+                <span>Shift+Enter for a new line</span>
+              </div>
+              <Button kind="primary" renderIcon={Send} disabled={!composerValue.trim() || sending} onClick={handleSend}>
+                {sending ? 'Sending' : 'Send'}
+              </Button>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      {settingsOpen && (
+        <div className="settings-overlay open" onClick={() => setSettingsOpen(false)} role="presentation">
+          <div className="settings-drawer" onClick={(event) => event.stopPropagation()}>
+            <div className="settings-header">
+              <div>
+                <p className="eyebrow">Chat controls</p>
+                <h3>Settings</h3>
+              </div>
+              <Button kind="ghost" size="sm" onClick={() => setSettingsOpen(false)}>
+                Close
+              </Button>
             </div>
 
-            <div className="setting-group">
-              <label>Top P ({settings.top_p})</label>
-              <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.05"
-                value={settings.top_p}
-                onChange={(e) => setSettings(s => ({ ...s, top_p: parseFloat(e.target.value) }))}
-              />
+            <div className="settings-body">
+              <label>
+                <span>Temperature: {settings.temperature.toFixed(1)}</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.1"
+                  value={settings.temperature}
+                  onChange={(event) => persistSettings({ ...settings, temperature: Number(event.target.value) })}
+                />
+              </label>
+
+              <label>
+                <span>Top P: {settings.topP.toFixed(2)}</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={settings.topP}
+                  onChange={(event) => persistSettings({ ...settings, topP: Number(event.target.value) })}
+                />
+              </label>
+
+              <label>
+                <span>Max tokens</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="8192"
+                  value={settings.maxTokens}
+                  onChange={(event) => persistSettings({ ...settings, maxTokens: Number(event.target.value) || 1 })}
+                />
+              </label>
             </div>
 
-            <div className="setting-group">
-              <label>Max Tokens</label>
-              <input
-                type="number"
-                min="1"
-                max="8192"
-                value={settings.maxTokens}
-                onChange={(e) => setSettings(s => ({ ...s, maxTokens: parseInt(e.target.value) }))}
-              />
-            </div>
-
-            <div className="modal-actions">
-              <button className="cancel-btn" onClick={() => setShowSettings(false)}>Cancel</button>
-              <button className="save-btn" onClick={handleSettingsSave}>Save</button>
+            <div className="settings-footer">
+              <Button kind="secondary" onClick={() => persistSettings(DEFAULT_SETTINGS)}>
+                Reset
+              </Button>
+              <Button kind="primary" onClick={handleSettingsSave}>
+                Save
+              </Button>
             </div>
           </div>
         </div>

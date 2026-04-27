@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, List
 from datetime import datetime
 
@@ -12,7 +12,23 @@ class ChatRequest(BaseModel):
     max_tokens: int = Field(512, ge=1)
 
 
+class ConversationCreateRequest(BaseModel):
+    title: str = Field("New Chat", min_length=1)
+    model: str = "mistral"
+    temperature: float = Field(0.7, ge=0, le=1)
+    top_p: float = Field(0.9, ge=0, le=1)
+    max_tokens: int = Field(512, ge=1)
+
+
+class ConversationUpdateRequest(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1)
+    model: Optional[str] = None
+    archived: Optional[bool] = None
+
+
 class MessageResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     conversation_id: str
     role: str
@@ -22,11 +38,9 @@ class MessageResponse(BaseModel):
     response_time_ms: Optional[float] = None
     created_at: datetime
 
-    class Config:
-        from_attributes = True
-
-
 class ConversationInfo(BaseModel):
+    model_config = ConfigDict(from_attributes=True, protected_namespaces=())
+
     id: str
     title: str
     model_name: str
@@ -38,21 +52,15 @@ class ConversationInfo(BaseModel):
     archived: bool
     message_count: int
 
-    class Config:
-        from_attributes = True
-
-
 class ConversationDetail(BaseModel):
+    model_config = ConfigDict(from_attributes=True, protected_namespaces=())
+
     id: str
     title: str
     model_name: str
     messages: List[MessageResponse]
     created_at: datetime
     updated_at: datetime
-
-    class Config:
-        from_attributes = True
-
 
 class OllamaModel(BaseModel):
     name: str

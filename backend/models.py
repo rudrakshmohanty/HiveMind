@@ -2,7 +2,11 @@ from sqlalchemy import Column, String, Text, Integer, Float, Boolean, DateTime, 
 from sqlalchemy.dialects.sqlite import JSON
 from sqlalchemy.orm import relationship
 from datetime import datetime
-from .database import Base
+
+try:
+    from .database import Base
+except ImportError:
+    from database import Base
 
 
 class Conversation(Base):

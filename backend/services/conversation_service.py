@@ -1,8 +1,14 @@
 import uuid
 from datetime import datetime
+from typing import Optional
 from sqlalchemy.orm import Session
-from ..models import Conversation, Message
-from ..database import SessionLocal
+
+try:
+    from ..models import Conversation, Message
+    from ..database import SessionLocal
+except ImportError:
+    from models import Conversation, Message
+    from database import SessionLocal
 
 
 def create_conversation(db: Session, title: str = "New Chat", model: str = "mistral",
@@ -47,7 +53,7 @@ def add_message(db: Session, conversation_id: str, role: str, content: str,
     return msg
 
 
-def get_conversation(db: Session, conv_id: str) -> Conversation | None:
+def get_conversation(db: Session, conv_id: str) -> Optional[Conversation]:
     return db.query(Conversation).filter(Conversation.id == conv_id).first()
 
 
