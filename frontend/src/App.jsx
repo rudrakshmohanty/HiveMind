@@ -71,6 +71,14 @@ function conversationTitle(conversation) {
   return conversation.title?.trim() || 'New chat';
 }
 
+function buildConversationTitle(messageText) {
+  const cleaned = messageText.trim().replace(/\s+/g, ' ');
+  if (!cleaned) return 'New chat';
+
+  const title = cleaned.slice(0, 50);
+  return title.length < cleaned.length ? `${title.trimEnd()}...` : title;
+}
+
 function statusTagType(status) {
   if (status === 'ok') return 'green';
   if (status === 'warn') return 'yellow';
@@ -257,24 +265,12 @@ export default function App() {
   }, [settingsOpen]);
 
   const handleNewConversation = async () => {
-    try {
-      const title = composerValue.trim().slice(0, 50) || 'New chat';
-      const conversation = await createConversation(API_BASE, {
-        title,
-        model: selectedModel,
-        temperature: settings.temperature,
-        top_p: settings.topP,
-        max_tokens: settings.maxTokens,
-      });
-
-      setConversations((current) => [conversation, ...current.filter((item) => item.id !== conversation.id)]);
-      setActiveConversationId(conversation.id);
-      setMessages([]);
-      setSidebarOpen(false);
-      focusComposer();
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Unable to create conversation');
-    }
+    setActiveConversationId(null);
+    setMessages([]);
+    setComposerValue('');
+    setErrorMessage('');
+    setSidebarOpen(false);
+    focusComposer();
   };
 
   const handleSelectConversation = async (conversationId) => {
@@ -309,7 +305,7 @@ export default function App() {
     if (activeConversationId) return activeConversationId;
 
     const conversation = await createConversation(API_BASE, {
-      title: messageText.slice(0, 50) || 'New chat',
+      title: buildConversationTitle(messageText),
       model: selectedModel,
       temperature: settings.temperature,
       top_p: settings.topP,
@@ -575,13 +571,13 @@ export default function App() {
               id="model-select"
               labelText="Model"
               hideLabel
-              value={selectedModel.toUpperCase()}
-              onChange={(event) => setSelectedModel(event.target.value.toUpperCase())}
+              value={selectedModel}
+              onChange={(event) => setSelectedModel(event.target.value)}
               size="sm"
             >
               {models.length === 0 && <SelectItem text="Loading models..." value="" />}
               {models.map((model) => (
-                <SelectItem key={model.name.toUpperCase()} text={model.name.toUpperCase()} value={model.name.toUpperCase()} />
+                <SelectItem key={model.name} text={model.name.toUpperCase()} value={model.name} />
               ))}
             </Select>
           </div>

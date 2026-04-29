@@ -13,6 +13,15 @@ except ImportError:
 router = APIRouter()
 
 
+def build_auto_title(message_text: str) -> str:
+    cleaned = " ".join(message_text.strip().split())
+    if not cleaned:
+        return "New Chat"
+
+    title = cleaned[:50]
+    return f"{title.rstrip()}..." if len(title) < len(cleaned) else title
+
+
 @router.post("/chat", response_model=schemas.MessageResponse)
 async def send_chat(req: schemas.ChatRequest, db = Depends(database.get_db)):
     """Non-streaming chat endpoint."""
@@ -44,6 +53,10 @@ async def send_chat(req: schemas.ChatRequest, db = Depends(database.get_db)):
         conv = conversation_service.get_conversation(db, conv_id)
         if not conv:
             raise HTTPException(status_code=404, detail="Conversation not found")
+
+    if conversation_service.should_autotitle_conversation(conv):
+        conversation_service.update_conversation_title(db, conv_id, build_auto_title(message_text))
+        conv = conversation_service.get_conversation(db, conv_id)
 
     # Get conversation history for context
     history_msgs = conversation_service.get_conversation_messages(db, conv_id)
@@ -118,6 +131,10 @@ async def send_chat_stream(request: Request):
         conv = conversation_service.get_conversation(database.db, conv_id)
         if not conv:
             raise HTTPException(status_code=404, detail="Conversation not found")
+
+    if conversation_service.should_autotitle_conversation(conv):
+        conversation_service.update_conversation_title(db, conv_id, build_auto_title(message_text))
+        conv = conversation_service.get_conversation(db, conv_id)
 
     # Get conversation history
     db = database.db
