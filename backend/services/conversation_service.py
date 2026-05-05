@@ -54,6 +54,20 @@ def create_conversation(db, title: str = "New Chat", model: str = "mistral",
     return _serialize_conversation(conv_doc)
 
 
+def update_conversation_title(db, conv_id: str, title: str) -> None:
+    conversations_collection.update_one(
+        {"_id": conv_id},
+        {"$set": {"title": title, "updated_at": datetime.utcnow()}},
+    )
+
+
+def should_autotitle_conversation(conversation: Optional[dict]) -> bool:
+    if not conversation:
+        return False
+    title = (conversation.get("title") or "").strip().lower()
+    return title in {"", "new chat"}
+
+
 def add_message(db, conversation_id: str, role: str, content: str,
                 model: str, tokens_used: int = 0, response_time_ms: float = None) -> dict:
     msg_id = str(uuid.uuid4())

@@ -10,6 +10,9 @@ class ChatRequest(BaseModel):
     temperature: float = Field(0.7, ge=0, le=1)
     top_p: float = Field(0.9, ge=0, le=1)
     max_tokens: int = Field(512, ge=1)
+    # When set, the chat router will retrieve relevant code chunks from this
+    # assistant's vector index and inject them as system context.
+    assistant_id: Optional[str] = None
 
 
 class ConversationCreateRequest(BaseModel):
@@ -78,3 +81,28 @@ class OllamaModelsResponse(BaseModel):
 class HealthStatus(BaseModel):
     ollama: str
     api: str = "ok"
+
+
+# ---------------------------------------------------------------------------
+# Assistant schemas
+# ---------------------------------------------------------------------------
+
+class AssistantCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = ""
+    codebase_path: str = Field(..., min_length=1)
+
+
+class AssistantInfo(BaseModel):
+    model_config = ConfigDict(from_attributes=True, protected_namespaces=())
+
+    id: str
+    name: str
+    description: str
+    codebase_path: str
+    indexed_files: int
+    total_chunks: int
+    index_status: str
+    last_indexed: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime

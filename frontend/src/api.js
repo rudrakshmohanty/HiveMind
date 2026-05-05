@@ -74,3 +74,44 @@ export async function sendMessageStream(baseURL, data) {
   }
   return resp.body;
 }
+
+// ---------------------------------------------------------------------------
+// Assistant (RAG codespace) API
+// ---------------------------------------------------------------------------
+
+export async function fetchAssistants(baseURL) {
+  const resp = await fetch(`${baseURL}/assistants`);
+  if (!resp.ok) throw new Error('Failed to fetch assistants');
+  return resp.json();
+}
+
+export async function createAssistant(baseURL, data) {
+  const resp = await fetch(`${baseURL}/assistants`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Failed to create assistant: ${text}`);
+  }
+  return resp.json();
+}
+
+export async function deleteAssistant(baseURL, id) {
+  const resp = await fetch(`${baseURL}/assistants/${id}`, { method: 'DELETE' });
+  if (!resp.ok) throw new Error('Failed to delete assistant');
+  return resp.json();
+}
+
+export async function triggerIndex(baseURL, id) {
+  const resp = await fetch(`${baseURL}/assistants/${id}/index`, { method: 'POST' });
+  if (!resp.ok) throw new Error('Failed to start indexing');
+  return resp.json();
+}
+
+export async function fetchIndexStatus(baseURL, id) {
+  const resp = await fetch(`${baseURL}/assistants/${id}/index/status`);
+  if (!resp.ok) throw new Error('Failed to fetch index status');
+  return resp.json();
+}

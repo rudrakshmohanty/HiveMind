@@ -14,6 +14,7 @@ db = client[MONGODB_DB]
 
 conversations_collection = db["conversations"]
 messages_collection = db["messages"]
+assistants_collection = db["assistants"]
 
 
 def ensure_indexes() -> None:
