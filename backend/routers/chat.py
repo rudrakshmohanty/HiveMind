@@ -5,10 +5,10 @@ import json
 
 try:
     from .. import schemas, database
-    from ..services import ollama_service, conversation_service
+    from ..services import conversation_service, ollama_service, rag_service
 except ImportError:
     import schemas, database
-    from services import ollama_service, conversation_service
+    from services import conversation_service, ollama_service, rag_service
 
 router = APIRouter()
 
@@ -198,9 +198,45 @@ async def send_chat_stream_post(req: schemas.ChatRequest):
     messages_history = [{"role": m["role"], "content": m["content"]} for m in history_msgs]
     conversation_service.add_message(db, conv_id, "user", req.message, model)
 
+    # ------------------------------------------------------------------
+    # RAG CONTEXT INJECTION
+    # If the request carries an assistant_id, retrieve the top-K most
+    # relevant code chunks from that assistant's vector index and prepend
+    # them as a system message.
+    #
+    # WHY A SYSTEM MESSAGE?
+    # Ollama / most LLMs treat the "system" role as ground-truth context
+    # the model should always respect. Putting the code there tells the
+    # model: "answer based on this, not on what you were trained on."
+    # ------------------------------------------------------------------
+    messages_for_ollama = []
+
+    if req.assistant_id:
+        try:
+            chunks = await rag_service.query_context(req.assistant_id, req.message)
+            if chunks:
+                assistant_doc = database.assistants_collection.find_one({"_id": req.assistant_id})
+                project_name = assistant_doc.get("name", "the project") if assistant_doc else "the project"
+                context_text = "\n\n---\n\n".join(chunks)
+                messages_for_ollama.append({
+                    "role": "system",
+                    "content": (
+                        f"You are a coding assistant for '{project_name}'. "
+                        "Use the following code snippets retrieved from the codebase to answer accurately. "
+                        "When referencing code, always mention the file path shown at the top of each snippet. "
+                        "If the answer is not in the provided snippets, say so rather than guessing.\n\n"
+                        f"RETRIEVED CODE CONTEXT:\n\n{context_text}"
+                    ),
+                })
+        except Exception:
+            # RAG failure is non-fatal — fall back to plain chat
+            pass
+
+    messages_for_ollama.extend(messages_history + [{"role": "user", "content": req.message}])
+
     request_data = {
         "model": model,
-        "messages": messages_history + [{"role": "user", "content": req.message}],
+        "messages": messages_for_ollama,
         "stream": True,
         "options": {"temperature": temperature, "top_p": top_p},
     }

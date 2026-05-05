@@ -8,12 +8,11 @@ import {
   Tag,
   TextArea,
   TextInput,
-  Tile,
 } from '@carbon/react';
 import {
   Add,
+  Bot,
   Chat,
-  CheckmarkFilled,
   Menu,
   Renew,
   Script,
@@ -32,6 +31,7 @@ import {
   fetchStatus,
   sendMessageStream,
 } from './api';
+import AssistantsPage from './AssistantsPage';
 import './index.scss';
 
 const API_BASE = '/api';
@@ -132,19 +132,34 @@ function MessageBubble({ message }) {
   );
 }
 
-function EmptyState() {
+function EmptyState({ status, modelSummary, conversationCount }) {
+  const statusLabel = status === 'ok' ? 'Connected' : status === 'warn' ? 'Limited' : 'Offline';
   return (
     <div className="empty-state">
       <div className="empty-state-icon">
-        <Chat />
+        <Script size={40} />
       </div>
-      <h2>Start a conversation</h2>
-      <p>Choose a model, write a prompt, and let the AI handle the rest.</p>
+      <h2>Ollama Chat</h2>
+      <p>Your local AI, fully private. Pick a model and start a conversation.</p>
+      <div className="empty-state-meta">
+        <span className={`empty-meta-chip chip-${status}`}>
+          <span className={`status-dot status-${status}`} /> {statusLabel}
+        </span>
+        {modelSummary && (
+          <span className="empty-meta-chip">{modelSummary.name}</span>
+        )}
+        {conversationCount > 0 && (
+          <span className="empty-meta-chip">{conversationCount} saved chats</span>
+        )}
+      </div>
     </div>
   );
 }
 
 export default function App() {
+  const [view, setView] = useState('chat'); // 'chat' | 'assistants'
+  const [activeAssistantId, setActiveAssistantId] = useState(null);
+  const [activeAssistantName, setActiveAssistantName] = useState(null);
   const [conversations, setConversations] = useState([]);
   const [models, setModels] = useState([]);
   const [messages, setMessages] = useState([]);
@@ -266,9 +281,24 @@ export default function App() {
 
   const handleNewConversation = async () => {
     setActiveConversationId(null);
+    setActiveAssistantId(null);
+    setActiveAssistantName(null);
     setMessages([]);
     setComposerValue('');
     setErrorMessage('');
+    setSidebarOpen(false);
+    focusComposer();
+  };
+
+  // Called by AssistantsPage when the user clicks "Open chat" on an assistant.
+  const handleOpenAssistantChat = (assistant) => {
+    setActiveAssistantId(assistant.id);
+    setActiveAssistantName(assistant.name);
+    setActiveConversationId(null);
+    setMessages([]);
+    setComposerValue('');
+    setErrorMessage('');
+    setView('chat');
     setSidebarOpen(false);
     focusComposer();
   };
@@ -358,6 +388,9 @@ export default function App() {
         temperature: settings.temperature,
         top_p: settings.topP,
         max_tokens: settings.maxTokens,
+        // RAG: if we're chatting with a codespace assistant, pass its id so
+        // the backend retrieves relevant code chunks before calling Ollama.
+        ...(activeAssistantId ? { assistant_id: activeAssistantId } : {}),
       });
 
       if (!stream) {
@@ -448,9 +481,7 @@ export default function App() {
         <div className="sidebar-top">
           <div className="sidebar-brand">
             <div className="brand-copy">
-              <p className="eyebrow">Welcome</p>
               <h1>Ollama Chat</h1>
-              <p>History</p>
             </div>
 
             <div className="sidebar-brand-actions">
@@ -475,6 +506,22 @@ export default function App() {
               renderIcon={Search}
             />
           </div>
+        </div>
+
+        {/* Navigation: Chat | Assistants */}
+        <div className="sidebar-nav">
+          <button
+            className={`sidebar-nav-btn ${view === 'chat' ? 'active' : ''}`}
+            onClick={() => setView('chat')}
+          >
+            <Chat size={16} /> Chat
+          </button>
+          <button
+            className={`sidebar-nav-btn ${view === 'assistants' ? 'active' : ''}`}
+            onClick={() => setView('assistants')}
+          >
+            <Bot size={16} /> Assistants
+          </button>
         </div>
 
         <div className="sidebar-list-header">
@@ -552,11 +599,30 @@ export default function App() {
               onClick={() => setSidebarOpen((current) => !current)}
             />
             <div className="header-title-group">
-              <p className="eyebrow">Local inference</p>
-              <h2>{activeConversation ? conversationTitle(activeConversation) : 'New chat'}</h2>
-              <p className="conversation-subtitle">
-                {messages.length} message{messages.length === 1 ? '' : 's'}
+              <p className="eyebrow">
+                {view === 'assistants'
+                  ? 'RAG — Codespace Assistants'
+                  : activeAssistantName
+                    ? `Chatting with ${activeAssistantName}`
+                    : 'Local inference'}
               </p>
+              <h2>
+                {view === 'assistants'
+                  ? 'Assistants'
+                  : activeConversation
+                    ? conversationTitle(activeConversation)
+                    : 'New chat'}
+              </h2>
+              {view === 'chat' && (
+                <p className="conversation-subtitle">
+                  {activeAssistantName && (
+                    <span className="assistant-badge">
+                      <Bot size={12} /> {activeAssistantName}
+                    </span>
+                  )}
+                  {messages.length} message{messages.length === 1 ? '' : 's'}
+                </p>
+              )}
             </div>
           </div>
 
@@ -583,33 +649,13 @@ export default function App() {
           </div>
         </header>
 
-        <div className="workspace-content">
-          <section className="status-grid">
-            <Tile className="status-card">
-              <p className="status-label">Backend</p>
-              <div className="status-value">
-                {status === 'ok' ? <CheckmarkFilled /> : <WarningFilled />}
-                <span>{status === 'ok' ? 'Connected' : 'Attention needed'}</span>
-              </div>
-            </Tile>
+        {view === 'assistants' ? (
+          <div className="workspace-content">
+            <AssistantsPage onOpenChat={handleOpenAssistantChat} />
+          </div>
+        ) : null}
 
-            <Tile className="status-card">
-              <p className="status-label">Model</p>
-              <div className="status-value">
-                <span>{modelSummary?.name.toUpperCase() || 'No model selected'}</span>
-              </div>
-              <p className="status-caption">{modelSummary ? formatModelSize(modelSummary) : 'Load a model to begin'}</p>
-            </Tile>
-
-            <Tile className="status-card">
-              <p className="status-label">Conversations</p>
-              <div className="status-value">
-                <span>{conversations.length}</span>
-              </div>
-              <p className="status-caption">Saved locally in your database</p>
-            </Tile>
-          </section>
-
+        {view === 'chat' && <div className="workspace-content">
           <section className="chat-panel">
             {errorMessage && (
               <div className="error-banner" role="alert">
@@ -620,7 +666,7 @@ export default function App() {
 
             <div className="message-stream">
               {messages.length === 0 ? (
-                <EmptyState />
+                <EmptyState status={status} modelSummary={modelSummary} conversationCount={conversations.length} />
               ) : (
                 messages.map((message) => <MessageBubble key={message.id} message={message} />)
               )}
@@ -650,7 +696,7 @@ export default function App() {
               </div>
             </div>
           </section>
-        </div>
+        </div>}
       </main>
 
       {settingsOpen && (

@@ -14,10 +14,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 try:
     from .database import ensure_indexes
-    from .routers import chat, conversations, health
+    from .routers import assistants, chat, conversations, health
 except ImportError:
     from database import ensure_indexes
-    from routers import chat, conversations, health
+    from routers import assistants, chat, conversations, health
 
 app = FastAPI(title="Ollama Chat", version="0.1.0")
 
@@ -33,6 +33,7 @@ app.add_middleware(
 app.include_router(health.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
 app.include_router(conversations.router, prefix="/api/conversations")
+app.include_router(assistants.router, prefix="/api/assistants")
 
 
 @app.on_event("startup")
