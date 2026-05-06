@@ -104,8 +104,9 @@ export async function deleteAssistant(baseURL, id) {
   return resp.json();
 }
 
-export async function triggerIndex(baseURL, id) {
-  const resp = await fetch(`${baseURL}/assistants/${id}/index`, { method: 'POST' });
+export async function triggerIndex(baseURL, id, force = false) {
+  const url = `${baseURL}/assistants/${id}/index${force ? '?force=true' : ''}`;
+  const resp = await fetch(url, { method: 'POST' });
   if (!resp.ok) throw new Error('Failed to start indexing');
   return resp.json();
 }

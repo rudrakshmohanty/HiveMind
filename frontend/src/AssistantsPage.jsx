@@ -119,14 +119,14 @@ export default function AssistantsPage({ onOpenChat }) {
     }
   };
 
-  const handleIndex = async (id) => {
+  const handleIndex = async (id, force = false) => {
     setCardErrors((prev) => {
       const next = { ...prev };
       delete next[id];
       return next;
     });
     try {
-      await triggerIndex(API_BASE, id);
+      await triggerIndex(API_BASE, id, force);
       setAssistants((prev) =>
         prev.map((a) => (a.id === id ? { ...a, index_status: 'indexing' } : a)),
       );
@@ -308,10 +308,21 @@ export default function AssistantsPage({ onOpenChat }) {
                   size="sm"
                   renderIcon={Renew}
                   disabled={assistant.index_status === 'indexing'}
-                  onClick={() => handleIndex(assistant.id)}
+                  onClick={() => handleIndex(assistant.id, false)}
                 >
-                  {assistant.index_status === 'not_indexed' ? 'Index' : 'Re-index'}
+                  {assistant.index_status === 'not_indexed' ? 'Index' : 'Smart re-index'}
                 </Button>
+                {assistant.index_status !== 'not_indexed' && (
+                  <Button
+                    kind="ghost"
+                    size="sm"
+                    disabled={assistant.index_status === 'indexing'}
+                    onClick={() => handleIndex(assistant.id, true)}
+                    title="Wipe the index and re-embed every file from scratch"
+                  >
+                    Full re-index
+                  </Button>
+                )}
 
                 <Button
                   kind="primary"

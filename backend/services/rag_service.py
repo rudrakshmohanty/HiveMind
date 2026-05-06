@@ -34,6 +34,8 @@ WHY CHUNK?
   still appears complete in at least one chunk.
 """
 
+import asyncio
+import hashlib
 import os
 import uuid
 from pathlib import Path
@@ -50,6 +52,14 @@ EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
 
 # ChromaDB stores its data in this local folder (no server needed).
 CHROMA_PATH = os.getenv("CHROMA_PATH", "./chroma_db")
+
+# How many files to embed concurrently. Higher = faster, but uses more RAM
+# and may overwhelm Ollama on low-end hardware. Tune with INDEX_CONCURRENCY env var.
+INDEX_CONCURRENCY = int(os.getenv("INDEX_CONCURRENCY", "4"))
+
+# Max texts sent in a single /api/embed call. Larger batches reduce HTTP
+# round-trips but use more memory per request.
+EMBED_BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "32"))
 
 # ---------------------------------------------------------------------------
 # File-type and directory filters
@@ -104,11 +114,10 @@ def get_chroma_client() -> chromadb.PersistentClient:
 
 async def embed_text(text: str) -> list[float]:
     """
-    Call Ollama's /api/embeddings endpoint to get a vector for `text`.
+    Embed a single text — used at query time (one query per chat message).
 
-    This uses the same EMBED_MODEL for both indexing and querying — that's
-    crucial. Embeddings are only comparable when produced by the same model.
-    Mixing models would give you garbage similarity scores.
+    Embeddings are only comparable when produced by the same model, so
+    indexing and retrieval must both use EMBED_MODEL.
     """
     async with httpx.AsyncClient(timeout=60.0) as client:
         resp = await client.post(
@@ -117,6 +126,29 @@ async def embed_text(text: str) -> list[float]:
         )
         resp.raise_for_status()
         return resp.json()["embedding"]
+
+
+async def embed_texts_batch(texts: list[str]) -> list[list[float]]:
+    """
+    Embed multiple texts in a single Ollama request using /api/embed.
+
+    This is the key performance improvement over embed_text: instead of one
+    HTTP round-trip per chunk, we send all chunks for a file together and get
+    all embeddings back in one response. For a file with 10 chunks, this is
+    10× fewer network calls.
+
+    Requires Ollama ≥ 0.1.31. The response shape is:
+      { "embeddings": [[float, ...], [float, ...], ...] }
+    """
+    if not texts:
+        return []
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        resp = await client.post(
+            f"{OLLAMA_BASE_URL}/api/embed",
+            json={"model": EMBED_MODEL, "input": texts},
+        )
+        resp.raise_for_status()
+        return resp.json()["embeddings"]
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +185,11 @@ def collection_count(assistant_id: str) -> int:
         return get_collection(assistant_id).count()
     except Exception:
         return 0
+
+
+def file_content_hash(content: str) -> str:
+    """MD5 of file content — used to detect unchanged files during re-indexing."""
+    return hashlib.md5(content.encode("utf-8", errors="ignore")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -227,67 +264,170 @@ async def index_codebase(
     assistant_id: str,
     codebase_path: str,
     on_progress: Optional[callable] = None,
+    force_full: bool = False,
 ) -> dict:
     """
-    Full indexing pipeline for one assistant.
+    Incremental indexing pipeline (default) or full re-index (force_full=True).
 
-    on_progress(indexed_files, total_files, total_chunks) is called after each
-    file finishes so the router can push live progress to the status dict.
-    Because asyncio.CancelledError propagates through every `await`, cancelling
-    the parent task (on assistant deletion) stops indexing immediately at the
-    next embedding call.
+    Incremental mode
+    ----------------
+    Each chunk stored in ChromaDB carries the MD5 hash of its source file.
+    On re-index we:
+      1. Load existing hashes from ChromaDB (metadata only — no vectors, fast).
+      2. Hash every file on disk.
+      3. Skip files whose hash is unchanged  →  zero embedding work for them.
+      4. Delete and re-embed only changed/new files.
+      5. Delete chunks whose source file no longer exists on disk.
+
+    For a 1 000-file project where 50 files changed this means ~95 % fewer
+    embedding calls vs always wiping and re-indexing from scratch.
+    A first-time index (no existing data) automatically indexes everything.
+
+    Full mode (force_full=True)
+    ---------------------------
+    Wipes the entire collection and re-embeds every file unconditionally.
+    Use this when you want a guaranteed clean slate.
+
+    Concurrency / batching
+    ----------------------
+    Up to INDEX_CONCURRENCY files embed simultaneously.  Each file's chunks
+    are grouped into EMBED_BATCH_SIZE-sized batches → one HTTP call per batch,
+    not one per chunk.
+
+    Cancellation
+    ------------
+    CancelledError propagates through every `await`, so deleting an assistant
+    mid-index stops all concurrent tasks at the next network call.
     """
     files = collect_files(codebase_path)
     total_files = len(files)
     collection = get_collection(assistant_id)
 
-    # Wipe existing index so a re-index starts clean
-    existing = collection.get()
-    if existing["ids"]:
-        collection.delete(ids=existing["ids"])
+    # rel_path → Path for the current codebase state
+    current_files: dict[str, Path] = {
+        str(f.relative_to(codebase_path)): f for f in files
+    }
 
-    indexed_files = 0
-    total_chunks = 0
+    if force_full:
+        # Wipe everything and queue every file for embedding
+        existing = collection.get()
+        if existing["ids"]:
+            await asyncio.to_thread(collection.delete, ids=existing["ids"])
+        to_index: list[tuple[str, str, str]] = []   # (rel_path, content, hash)
+        for rel_path, file_path in current_files.items():
+            try:
+                content = file_path.read_text(encoding="utf-8", errors="ignore")
+                if content.strip():
+                    to_index.append((rel_path, content, file_content_hash(content)))
+            except Exception:
+                pass
+        skipped = 0
+    else:
+        # Load existing hashes — metadata only, no embedding vectors
+        existing_data = await asyncio.to_thread(collection.get, include=["metadatas"])
 
-    # Emit initial state so the frontend knows the total file count immediately
-    if on_progress:
-        on_progress(0, total_files, 0)
+        ids_by_file: dict[str, list[str]] = {}
+        hash_by_file: dict[str, str] = {}
+        for doc_id, meta in zip(
+            existing_data.get("ids", []),
+            existing_data.get("metadatas", []) or [],
+        ):
+            if not meta:
+                continue
+            rel = meta.get("file")
+            h   = meta.get("hash")
+            if rel:
+                ids_by_file.setdefault(rel, []).append(doc_id)
+                if h:
+                    hash_by_file[rel] = h
 
-    for file_path in files:
-        try:
-            content = file_path.read_text(encoding="utf-8", errors="ignore")
-            if not content.strip():
+        # Delete chunks for files removed from disk
+        removed = set(ids_by_file) - set(current_files)
+        if removed:
+            gone_ids = [doc_id for r in removed for doc_id in ids_by_file[r]]
+            await asyncio.to_thread(collection.delete, ids=gone_ids)
+
+        # Decide which files need re-embedding
+        to_index = []
+        skipped  = 0
+        for rel_path, file_path in current_files.items():
+            try:
+                content = file_path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                skipped += 1
                 continue
 
-            rel_path = str(file_path.relative_to(codebase_path))
-            chunks = chunk_file(content, rel_path)
+            current_hash = file_content_hash(content)
+            if hash_by_file.get(rel_path) == current_hash:
+                skipped += 1    # unchanged — keep existing chunks as-is
+                continue
 
-            for chunk in chunks:
-                # Each await here is a cancellation point — if the parent task
-                # is cancelled (e.g. assistant deleted) this raises CancelledError
-                # and unwinds the whole pipeline immediately.
-                embedding = await embed_text(chunk["text"])
-                collection.add(
-                    ids=[str(uuid.uuid4())],
-                    embeddings=[embedding],
-                    documents=[chunk["text"]],
-                    metadatas=[{
-                        "file": chunk["file"],
-                        "start_line": chunk["start_line"],
-                        "end_line": chunk["end_line"],
-                    }],
+            # Changed or new file — remove stale chunks before re-embedding
+            if rel_path in ids_by_file:
+                await asyncio.to_thread(collection.delete, ids=ids_by_file[rel_path])
+
+            if content.strip():
+                to_index.append((rel_path, content, current_hash))
+
+    # state["done"] starts at `skipped` so the progress bar reflects files
+    # that were already up-to-date as immediately processed.
+    state = {"done": skipped, "new_chunks": 0}
+    semaphore = asyncio.Semaphore(INDEX_CONCURRENCY)
+
+    if on_progress:
+        on_progress(state["done"], total_files, 0)
+
+    async def process_file(rel_path: str, content: str, content_hash: str) -> None:
+        async with semaphore:
+            try:
+                chunks = chunk_file(content, rel_path)
+                if not chunks:
+                    return
+
+                texts = [c["text"] for c in chunks]
+
+                all_embeddings: list[list[float]] = []
+                for i in range(0, len(texts), EMBED_BATCH_SIZE):
+                    all_embeddings.extend(await embed_texts_batch(texts[i : i + EMBED_BATCH_SIZE]))
+
+                await asyncio.to_thread(
+                    collection.add,
+                    ids=[str(uuid.uuid4()) for _ in chunks],
+                    embeddings=all_embeddings,
+                    documents=texts,
+                    metadatas=[
+                        {
+                            "file": c["file"],
+                            "start_line": c["start_line"],
+                            "end_line": c["end_line"],
+                            "hash": content_hash,   # stored for future incremental runs
+                        }
+                        for c in chunks
+                    ],
                 )
-                total_chunks += 1
 
-            indexed_files += 1
-            if on_progress:
-                on_progress(indexed_files, total_files, total_chunks)
+                state["done"] += 1
+                state["new_chunks"] += len(chunks)
+                if on_progress:
+                    on_progress(state["done"], total_files, state["new_chunks"])
 
-        except Exception:
-            # Skip files that can't be read or embedded (but let CancelledError propagate)
-            continue
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                state["done"] += 1
+                if on_progress:
+                    on_progress(state["done"], total_files, state["new_chunks"])
 
-    return {"indexed_files": indexed_files, "total_chunks": total_chunks, "total_files": total_files}
+    await asyncio.gather(*[process_file(r, c, h) for r, c, h in to_index])
+
+    # Query live count so total_chunks reflects unchanged + newly added chunks.
+    total_chunks = await asyncio.to_thread(collection.count)
+
+    return {
+        "indexed_files": total_files,
+        "total_chunks": total_chunks,
+        "total_files": total_files,
+    }
 
 
 # ---------------------------------------------------------------------------

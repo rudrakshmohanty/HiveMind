@@ -140,19 +140,19 @@ async def delete_assistant(assistant_id: str):
 
 
 @router.post("/{assistant_id}/index")
-async def trigger_index(assistant_id: str):
+async def trigger_index(assistant_id: str, force: bool = False):
     """
     Start (re-)indexing in the background via asyncio.create_task.
 
-    We use create_task (not FastAPI BackgroundTasks) because it gives us
-    a Task handle we can .cancel() later. Returns immediately; client polls
-    GET /{id}/index/status for live progress.
+    By default uses incremental mode — only changed/new files are re-embedded.
+    Pass ?force=true to wipe the collection and re-index everything from scratch.
+
+    Returns immediately; client polls GET /{id}/index/status for live progress.
     """
     doc = database.assistants_collection.find_one({"_id": assistant_id})
     if not doc:
         raise HTTPException(status_code=404, detail="Assistant not found")
 
-    # If already indexing, cancel it first (supports re-index while running)
     await _cancel_task(assistant_id)
 
     _index_status[assistant_id] = {
@@ -167,7 +167,7 @@ async def trigger_index(assistant_id: str):
         {"$set": {"index_status": "indexing", "updated_at": datetime.now(timezone.utc)}},
     )
 
-    task = asyncio.create_task(_run_indexing(assistant_id, doc["codebase_path"]))
+    task = asyncio.create_task(_run_indexing(assistant_id, doc["codebase_path"], force_full=force))
     _index_tasks[assistant_id] = task
 
     return {"status": "indexing"}
@@ -196,7 +196,7 @@ async def get_index_status(assistant_id: str):
 # Indexing task
 # ---------------------------------------------------------------------------
 
-async def _run_indexing(assistant_id: str, codebase_path: str) -> None:
+async def _run_indexing(assistant_id: str, codebase_path: str, force_full: bool = False) -> None:
     """
     Runs as an asyncio Task so it can be cancelled at any await point.
 
@@ -214,7 +214,7 @@ async def _run_indexing(assistant_id: str, codebase_path: str) -> None:
             }
 
         result = await rag_service.index_codebase(
-            assistant_id, codebase_path, on_progress=on_progress
+            assistant_id, codebase_path, on_progress=on_progress, force_full=force_full
         )
 
         now = datetime.now(timezone.utc)
