@@ -6,14 +6,16 @@ import {
   Select,
   SelectItem,
   Tag,
-  TextArea,
   TextInput,
 } from '@carbon/react';
 import {
   Add,
   Bot,
   Chat,
+  Checkmark,
+  Light,
   Menu,
+  Moon,
   Renew,
   Script,
   Search,
@@ -42,6 +44,15 @@ const DEFAULT_SETTINGS = {
   topP: 0.9,
   maxTokens: 1024,
 };
+
+const SUGGESTED_PROMPTS = [
+  'Explain this code to me',
+  'Write a Python script that...',
+  'What are the best practices for...',
+  'Debug this error: ...',
+  'Summarize the key points of...',
+  'Help me write a regex that...',
+];
 
 function formatTime(value) {
   if (!value) return '';
@@ -85,8 +96,56 @@ function statusTagType(status) {
   return 'red';
 }
 
-function MessageBubble({ message }) {
+function groupConversationsByDate(conversations) {
+  const now = Date.now();
+  const groups = { Today: [], Yesterday: [], Earlier: [] };
+  conversations.forEach((conv) => {
+    const delta = now - new Date(conv.updated_at || 0).getTime();
+    if (delta < 86_400_000) groups.Today.push(conv);
+    else if (delta < 172_800_000) groups.Yesterday.push(conv);
+    else groups.Earlier.push(conv);
+  });
+  return groups;
+}
+
+function CodeBlock({ children }) {
+  const [copied, setCopied] = useState(false);
+  const codeEl = children?.props;
+  const codeText = String(codeEl?.children ?? '').trimEnd();
+  const langClass = codeEl?.className ?? '';
+  const lang = langClass.replace('language-', '') || null;
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(codeText).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }).catch(() => {});
+  };
+
+  return (
+    <div className="md-code-block">
+      <div className="code-block-header">
+        {lang ? <span className="code-lang-label">{lang}</span> : <span />}
+        <button className="code-copy-btn" onClick={handleCopy} aria-label="Copy code">
+          {copied ? <><Checkmark size={13} /> Copied!</> : 'Copy'}
+        </button>
+      </div>
+      <pre>{children}</pre>
+    </div>
+  );
+}
+
+function MessageBubble({ message, isStreaming }) {
+  const [msgCopied, setMsgCopied] = useState(false);
   const isUser = message.role === 'user';
+  const showTyping = isStreaming && !message.content && !isUser;
+
+  const handleMsgCopy = () => {
+    navigator.clipboard.writeText(message.content || '').then(() => {
+      setMsgCopied(true);
+      setTimeout(() => setMsgCopied(false), 2000);
+    }).catch(() => {});
+  };
 
   return (
     <article className={`bubble ${isUser ? 'bubble-user' : 'bubble-assistant'}`}>
@@ -101,6 +160,11 @@ function MessageBubble({ message }) {
         <div className={`bubble-content ${isUser ? 'bubble-content-user' : 'markdown-content'}`}>
           {isUser ? (
             message.content
+          ) : showTyping ? (
+            <div className="typing-indicator" aria-label="Generating response">
+              <span /><span /><span />
+              <span className="typing-label">Generating…</span>
+            </div>
           ) : (
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
@@ -110,7 +174,7 @@ function MessageBubble({ message }) {
                     {children}
                   </a>
                 ),
-                pre: ({ children }) => <pre className="md-code-block">{children}</pre>,
+                pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
                 code: ({ inline, className, children, ...props }) =>
                   inline ? (
                     <code className="md-inline-code" {...props}>
@@ -128,19 +192,29 @@ function MessageBubble({ message }) {
           )}
         </div>
       </div>
+      <button
+        className="bubble-copy-btn"
+        onClick={handleMsgCopy}
+        aria-label="Copy message"
+      >
+        {msgCopied ? <><Checkmark size={13} /> Copied!</> : 'Copy'}
+      </button>
     </article>
   );
 }
 
-function EmptyState({ status, modelSummary, conversationCount }) {
+function EmptyState({ status, modelSummary, conversationCount, onSuggestPrompt }) {
   const statusLabel = status === 'ok' ? 'Connected' : status === 'warn' ? 'Limited' : 'Offline';
   return (
     <div className="empty-state">
-      <div className="empty-state-icon">
-        <Script size={40} />
+      <div className="empty-state-icon-wrap">
+        <div className="empty-state-icon-bg" aria-hidden="true" />
+        <div className="empty-state-icon">
+          <Script size={32} />
+        </div>
       </div>
       <h2>Ollama Chat</h2>
-      <p>Your local AI, fully private. Pick a model and start a conversation.</p>
+      <p className="empty-state-desc">Your local AI, fully private. Pick a model and start a conversation.</p>
       <div className="empty-state-meta">
         <span className={`empty-meta-chip chip-${status}`}>
           <span className={`status-dot status-${status}`} /> {statusLabel}
@@ -152,12 +226,23 @@ function EmptyState({ status, modelSummary, conversationCount }) {
           <span className="empty-meta-chip">{conversationCount} saved chats</span>
         )}
       </div>
+      <div className="empty-state-prompts">
+        {SUGGESTED_PROMPTS.map((prompt) => (
+          <button
+            key={prompt}
+            className="prompt-chip"
+            onClick={() => onSuggestPrompt(prompt)}
+          >
+            {prompt}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
 
 export default function App() {
-  const [view, setView] = useState('chat'); // 'chat' | 'assistants'
+  const [view, setView] = useState('chat');
   const [activeAssistantId, setActiveAssistantId] = useState(null);
   const [activeAssistantName, setActiveAssistantName] = useState(null);
   const [conversations, setConversations] = useState([]);
@@ -184,9 +269,19 @@ export default function App() {
   });
 
   const messagesEndRef = useRef(null);
+  const conversationListRef = useRef(null);
+  const composerRef = useRef(null);
 
-  const focusComposer = () => {
-    document.getElementById('composer')?.focus();
+  const focusComposer = () => composerRef.current?.focus();
+
+  const resetComposerHeight = () => {
+    if (composerRef.current) composerRef.current.style.height = 'auto';
+  };
+
+  const handleComposerInput = (event) => {
+    const el = event.target;
+    el.style.height = 'auto';
+    el.style.height = `${el.scrollHeight}px`;
   };
 
   const activeConversation = useMemo(
@@ -288,9 +383,11 @@ export default function App() {
     setErrorMessage('');
     setSidebarOpen(false);
     focusComposer();
+    setTimeout(() => {
+      conversationListRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+    }, 50);
   };
 
-  // Called by AssistantsPage when the user clicks "Open chat" on an assistant.
   const handleOpenAssistantChat = (assistant) => {
     setActiveAssistantId(assistant.id);
     setActiveAssistantName(assistant.name);
@@ -355,6 +452,7 @@ export default function App() {
     setErrorMessage('');
     setSettingsOpen(false);
     setComposerValue('');
+    resetComposerHeight();
 
     let conversationId;
 
@@ -388,8 +486,6 @@ export default function App() {
         temperature: settings.temperature,
         top_p: settings.topP,
         max_tokens: settings.maxTokens,
-        // RAG: if we're chatting with a codespace assistant, pass its id so
-        // the backend retrieves relevant code chunks before calling Ollama.
         ...(activeAssistantId ? { assistant_id: activeAssistantId } : {}),
       });
 
@@ -508,7 +604,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* Navigation: Chat | Assistants */}
         <div className="sidebar-nav">
           <button
             className={`sidebar-nav-btn ${view === 'chat' ? 'active' : ''}`}
@@ -529,46 +624,57 @@ export default function App() {
           <span>{filteredConversations.length}</span>
         </div>
 
-        <div className="conversation-stack">
+        <div className="conversation-stack" ref={conversationListRef}>
           {filteredConversations.length === 0 ? (
             <div className="sidebar-empty">
               <p>No conversations yet.</p>
             </div>
           ) : (
-            filteredConversations.map((conversation) => {
-              const isActive = conversation.id === activeConversationId;
-              return (
-                <div
-                  key={conversation.id}
-                  className={`conversation-card ${isActive ? 'conversation-card-active' : ''}`}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => handleSelectConversation(conversation.id)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault();
-                      handleSelectConversation(conversation.id);
-                    }
-                  }}
-                >
-                  <div className="conversation-card-main">
-                    <div className="conversation-card-title">{conversationTitle(conversation)}</div>
-                    <div className="conversation-card-meta">
-                      <span>{conversation.message_count ?? 0} messages</span>
-                      <span>{formatTime(conversation.updated_at)}</span>
-                    </div>
+            (() => {
+              const groups = groupConversationsByDate(filteredConversations);
+              return Object.entries(groups).map(([label, convs]) => {
+                if (convs.length === 0) return null;
+                return (
+                  <div key={label} className="conv-group">
+                    <p className="conv-group-label">{label}</p>
+                    {convs.map((conversation) => {
+                      const isActive = conversation.id === activeConversationId;
+                      return (
+                        <div
+                          key={conversation.id}
+                          className={`conversation-card ${isActive ? 'conversation-card-active' : ''}`}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => handleSelectConversation(conversation.id)}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.preventDefault();
+                              handleSelectConversation(conversation.id);
+                            }
+                          }}
+                        >
+                          <div className="conversation-card-main">
+                            <div className="conversation-card-title">{conversationTitle(conversation)}</div>
+                            <div className="conversation-card-meta">
+                              <span>{conversation.message_count ?? 0} messages</span>
+                              <span>{formatTime(conversation.updated_at)}</span>
+                            </div>
+                          </div>
+                          <Button
+                            kind="ghost"
+                            size="sm"
+                            hasIconOnly
+                            renderIcon={TrashCan}
+                            iconDescription={`Delete ${conversationTitle(conversation)}`}
+                            onClick={(event) => handleDeleteConversation(event, conversation.id)}
+                          />
+                        </div>
+                      );
+                    })}
                   </div>
-                  <Button
-                    kind="ghost"
-                    size="sm"
-                    hasIconOnly
-                    renderIcon={TrashCan}
-                    iconDescription={`Delete ${conversationTitle(conversation)}`}
-                    onClick={(event) => handleDeleteConversation(event, conversation.id)}
-                  />
-                </div>
-              );
-            })
+                );
+              });
+            })()
           )}
         </div>
 
@@ -586,6 +692,14 @@ export default function App() {
         </div>
       </aside>
 
+      {sidebarOpen && (
+        <div
+          className="sidebar-backdrop"
+          onClick={() => setSidebarOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+
       <main className="workspace">
         <header className="workspace-header">
           <div className="header-left">
@@ -594,7 +708,6 @@ export default function App() {
               size="sm"
               hasIconOnly
               renderIcon={Menu}
-              // iconDescription="Toggle Sidebar"
               className="sidebar-toggle-btn"
               onClick={() => setSidebarOpen((current) => !current)}
             />
@@ -627,9 +740,13 @@ export default function App() {
           </div>
 
           <div className="header-controls">
-            <Button kind="ghost" size="sm" className="theme-toggle-btn" onClick={handleThemeToggle}>
-              {theme === 'dark' ? 'Light mode' : 'Dark mode'}
-            </Button>
+            <button
+              className="theme-toggle-btn"
+              onClick={handleThemeToggle}
+              aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            >
+              {theme === 'dark' ? <Light size={18} /> : <Moon size={18} />}
+            </button>
             <Tag type={statusTagType(status)}>
               {status === 'ok' ? 'Ready' : status === 'warn' ? 'Limited' : 'Offline'}
             </Tag>
@@ -643,7 +760,7 @@ export default function App() {
             >
               {models.length === 0 && <SelectItem text="Loading models..." value="" />}
               {models.map((model) => (
-                <SelectItem key={model.name} text={model.name.toUpperCase()} value={model.name} />
+                <SelectItem key={model.name} text={model.name} value={model.name} />
               ))}
             </Select>
           </div>
@@ -655,48 +772,77 @@ export default function App() {
           </div>
         ) : null}
 
-        {view === 'chat' && <div className="workspace-content">
-          <section className="chat-panel">
-            {errorMessage && (
-              <div className="error-banner" role="alert">
-                <WarningFilled />
-                <span>{errorMessage}</span>
-              </div>
-            )}
-
-            <div className="message-stream">
-              {messages.length === 0 ? (
-                <EmptyState status={status} modelSummary={modelSummary} conversationCount={conversations.length} />
-              ) : (
-                messages.map((message) => <MessageBubble key={message.id} message={message} />)
-              )}
-              <div ref={messagesEndRef} />
-            </div>
-
-            <div className="composer-panel">
-              <TextArea
-                id="composer"
-                labelText="Write a message"
-                hideLabel
-                placeholder="Ask something, paste code, or describe the task..."
-                value={composerValue}
-                onChange={(event) => setComposerValue(event.target.value)}
-                onKeyDown={handleComposerKeyDown}
-                rows={4}
-              />
-
-              <div className="composer-actions">
-                <div className="composer-hint">
-                  <span>Enter to send</span>
-                  <span>Shift+Enter for a new line</span>
+        {view === 'chat' && (
+          <div className="workspace-content">
+            <section className="chat-panel">
+              {errorMessage && (
+                <div className="error-banner" role="alert">
+                  <WarningFilled />
+                  <span>{errorMessage}</span>
                 </div>
-                <Button kind="primary" renderIcon={Send} disabled={!composerValue.trim() || sending} onClick={handleSend}>
-                  {sending ? 'Sending' : 'Send'}
-                </Button>
+              )}
+
+              <div className="message-stream">
+                {messages.length === 0 ? (
+                  <EmptyState
+                    status={status}
+                    modelSummary={modelSummary}
+                    conversationCount={conversations.length}
+                    onSuggestPrompt={(text) => {
+                      setComposerValue(text);
+                      focusComposer();
+                    }}
+                  />
+                ) : (
+                  messages.map((message) => (
+                    <MessageBubble
+                      key={message.id}
+                      message={message}
+                      isStreaming={sending && message.id === 'streaming-assistant'}
+                    />
+                  ))
+                )}
+                <div ref={messagesEndRef} />
               </div>
-            </div>
-          </section>
-        </div>}
+
+              <div className="composer-panel">
+                <textarea
+                  ref={composerRef}
+                  id="composer"
+                  className="composer-textarea"
+                  placeholder="Ask something, paste code, or describe the task..."
+                  value={composerValue}
+                  onChange={(event) => setComposerValue(event.target.value)}
+                  onKeyDown={handleComposerKeyDown}
+                  onInput={handleComposerInput}
+                  rows={1}
+                />
+
+                <div className="composer-actions">
+                  <div className="composer-hint">
+                    {sending ? (
+                      <span className="composer-sending-hint">
+                        <span className="composer-spinner" aria-hidden="true" />
+                        Sending…
+                      </span>
+                    ) : (
+                      <>
+                        <span>Enter to send</span>
+                        <span>Shift+Enter for new line</span>
+                      </>
+                    )}
+                    {!sending && composerValue.length > 0 && (
+                      <span className="composer-char-count">{composerValue.length}</span>
+                    )}
+                  </div>
+                  <Button kind="primary" renderIcon={Send} disabled={!composerValue.trim() || sending} onClick={handleSend}>
+                    {sending ? 'Sending' : 'Send'}
+                  </Button>
+                </div>
+              </div>
+            </section>
+          </div>
+        )}
       </main>
 
       {settingsOpen && (
