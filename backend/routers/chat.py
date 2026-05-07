@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse
+import asyncio
 import time
 import json
 
@@ -213,23 +214,28 @@ async def send_chat_stream_post(req: schemas.ChatRequest):
 
     if req.assistant_id:
         try:
-            chunks = await rag_service.query_context(req.assistant_id, req.message)
-            if chunks:
-                assistant_doc = database.assistants_collection.find_one({"_id": req.assistant_id})
-                project_name = assistant_doc.get("name", "the project") if assistant_doc else "the project"
-                context_text = "\n\n---\n\n".join(chunks)
-                messages_for_ollama.append({
-                    "role": "system",
-                    "content": (
-                        f"You are a coding assistant for '{project_name}'. "
-                        "Use the following code snippets retrieved from the codebase to answer accurately. "
-                        "When referencing code, always mention the file path shown at the top of each snippet. "
-                        "If the answer is not in the provided snippets, say so rather than guessing.\n\n"
-                        f"RETRIEVED CODE CONTEXT:\n\n{context_text}"
-                    ),
-                })
+            chunks, indexed_files = await asyncio.gather(
+                rag_service.query_context(req.assistant_id, req.message),
+                asyncio.to_thread(rag_service.get_indexed_files, req.assistant_id),
+            )
+            assistant_doc = database.assistants_collection.find_one({"_id": req.assistant_id})
+            project_name = assistant_doc.get("name", "the project") if assistant_doc else "the project"
+
+            file_manifest = "\n".join(f"  - {f}" for f in indexed_files) if indexed_files else "  (none)"
+            context_text = "\n\n---\n\n".join(chunks) if chunks else "(no relevant snippets found)"
+
+            messages_for_ollama.append({
+                "role": "system",
+                "content": (
+                    f"You are a coding assistant for '{project_name}'.\n\n"
+                    f"INDEXED FILES ({len(indexed_files)} total):\n{file_manifest}\n\n"
+                    "RETRIEVED CODE SNIPPETS (most relevant to the current query):\n\n"
+                    f"{context_text}\n\n"
+                    "Instructions: answer based on the code above. Always mention the file path "
+                    "when referencing specific code. If the answer isn't in the snippets, say so."
+                ),
+            })
         except Exception:
-            # RAG failure is non-fatal — fall back to plain chat
             pass
 
     messages_for_ollama.extend(messages_history + [{"role": "user", "content": req.message}])

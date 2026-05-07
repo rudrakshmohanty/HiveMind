@@ -1,16 +1,3 @@
-/**
- * AssistantsPage — manage RAG-powered codespace assistants.
- *
- * HOW THIS PAGE FITS INTO RAG:
- *   This is the INDEXING side of RAG. Before the LLM can answer questions
- *   about your code, you need to:
- *     1. Create an assistant (give it a name + point it at a local directory)
- *     2. Hit "Index" — the backend walks the directory, chunks every file,
- *        embeds each chunk via Ollama, and stores the vectors in ChromaDB.
- *   After that, every chat message sent with this assistant automatically
- *   gets the 5 most relevant code snippets injected as system context.
- */
-
 import { useEffect, useRef, useState } from 'react';
 import { Button, Tag, TextInput, Tile } from '@carbon/react';
 import {
@@ -26,9 +13,6 @@ import {
 import { createAssistant, deleteAssistant, fetchAssistants, fetchIndexStatus, triggerIndex } from './api';
 
 const API_BASE = '/api';
-
-// How often (ms) to poll the index status while an assistant is indexing.
-// We keep it short so the user sees progress quickly.
 const POLL_INTERVAL = 2500;
 
 function formatDate(value) {
@@ -51,9 +35,9 @@ export default function AssistantsPage({ onOpenChat }) {
   const [form, setForm] = useState({ name: '', description: '', codebase_path: '' });
   const [formError, setFormError] = useState('');
   const [saving, setSaving] = useState(false);
+  const [deleteConfirmId, setDeleteConfirmId] = useState(null);
+  const [cardErrors, setCardErrors] = useState({});
 
-  // Track which assistants are currently being polled for indexing status.
-  // Structure: Set<assistant_id>
   const pollingRef = useRef(new Set());
   const pollTimerRef = useRef(null);
 
@@ -63,7 +47,6 @@ export default function AssistantsPage({ onOpenChat }) {
     return data || [];
   };
 
-  // Poll index status for any assistant currently indexing.
   const pollIndexing = async () => {
     const ids = [...pollingRef.current];
     if (ids.length === 0) return;
@@ -96,7 +79,6 @@ export default function AssistantsPage({ onOpenChat }) {
     );
   };
 
-  // Run the polling loop whenever the pollingRef has active entries.
   useEffect(() => {
     const tick = async () => {
       await pollIndexing();
@@ -110,7 +92,6 @@ export default function AssistantsPage({ onOpenChat }) {
 
   useEffect(() => {
     refresh().then((data) => {
-      // Resume polling for any already-indexing assistants
       data.forEach((a) => {
         if (a.index_status === 'indexing') pollingRef.current.add(a.id);
       });
@@ -138,14 +119,18 @@ export default function AssistantsPage({ onOpenChat }) {
     }
   };
 
-  const handleIndex = async (id) => {
+  const handleIndex = async (id, force = false) => {
+    setCardErrors((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
     try {
-      await triggerIndex(API_BASE, id);
+      await triggerIndex(API_BASE, id, force);
       setAssistants((prev) =>
         prev.map((a) => (a.id === id ? { ...a, index_status: 'indexing' } : a)),
       );
       pollingRef.current.add(id);
-      // Kick off the polling loop if it's not already running
       if (pollTimerRef.current === null) {
         const tick = async () => {
           await pollIndexing();
@@ -158,26 +143,28 @@ export default function AssistantsPage({ onOpenChat }) {
         tick();
       }
     } catch (err) {
-      alert(`Failed to start indexing: ${err.message}`);
+      setCardErrors((prev) => ({ ...prev, [id]: `Indexing failed: ${err.message}` }));
     }
   };
 
   const handleDelete = async (id) => {
-    if (!window.confirm('Delete this assistant and its entire vector index?')) return;
+    if (deleteConfirmId !== id) {
+      setDeleteConfirmId(id);
+      return;
+    }
+    setDeleteConfirmId(null);
     try {
       await deleteAssistant(API_BASE, id);
       pollingRef.current.delete(id);
       setAssistants((prev) => prev.filter((a) => a.id !== id));
     } catch (err) {
-      alert(`Failed to delete: ${err.message}`);
+      setCardErrors((prev) => ({ ...prev, [id]: `Delete failed: ${err.message}` }));
     }
   };
 
   return (
     <div className="assistants-page">
-      {/* ------------------------------------------------------------------ */}
-      {/* Header                                                              */}
-      {/* ------------------------------------------------------------------ */}
+      {/* Header */}
       <div className="assistants-header">
         <div className="assistants-header-copy">
           <p className="eyebrow">RAG — Retrieval-Augmented Generation</p>
@@ -194,9 +181,7 @@ export default function AssistantsPage({ onOpenChat }) {
         )}
       </div>
 
-      {/* ------------------------------------------------------------------ */}
-      {/* Create form                                                         */}
-      {/* ------------------------------------------------------------------ */}
+      {/* Create form */}
       {creating && (
         <Tile className="assistant-create-form">
           <p className="eyebrow" style={{ marginBottom: '1rem' }}>New assistant</p>
@@ -251,9 +236,7 @@ export default function AssistantsPage({ onOpenChat }) {
         </Tile>
       )}
 
-      {/* ------------------------------------------------------------------ */}
-      {/* Assistant cards                                                     */}
-      {/* ------------------------------------------------------------------ */}
+      {/* Assistant cards or empty state */}
       {assistants.length === 0 && !creating ? (
         <div className="assistants-empty">
           <Bot size={48} />
@@ -289,7 +272,6 @@ export default function AssistantsPage({ onOpenChat }) {
                 <span>{assistant.codebase_path}</span>
               </div>
 
-              {/* Stats — shown once indexed */}
               {assistant.index_status === 'ready' && (
                 <div className="assistant-card-stats">
                   <span>{assistant.indexed_files} files</span>
@@ -304,7 +286,6 @@ export default function AssistantsPage({ onOpenChat }) {
                 </div>
               )}
 
-              {/* Live progress bar — shown while indexing */}
               {assistant.index_status === 'indexing' && (
                 <div className="index-progress">
                   <div className="index-progress-track">
@@ -327,10 +308,21 @@ export default function AssistantsPage({ onOpenChat }) {
                   size="sm"
                   renderIcon={Renew}
                   disabled={assistant.index_status === 'indexing'}
-                  onClick={() => handleIndex(assistant.id)}
+                  onClick={() => handleIndex(assistant.id, false)}
                 >
-                  {assistant.index_status === 'not_indexed' ? 'Index' : 'Re-index'}
+                  {assistant.index_status === 'not_indexed' ? 'Index' : 'Smart re-index'}
                 </Button>
+                {assistant.index_status !== 'not_indexed' && (
+                  <Button
+                    kind="ghost"
+                    size="sm"
+                    disabled={assistant.index_status === 'indexing'}
+                    onClick={() => handleIndex(assistant.id, true)}
+                    title="Wipe the index and re-embed every file from scratch"
+                  >
+                    Full re-index
+                  </Button>
+                )}
 
                 <Button
                   kind="primary"
@@ -342,23 +334,39 @@ export default function AssistantsPage({ onOpenChat }) {
                   Open chat
                 </Button>
 
-                <Button
-                  kind="danger--ghost"
-                  size="sm"
-                  hasIconOnly
-                  renderIcon={TrashCan}
-                  iconDescription="Delete assistant"
-                  onClick={() => handleDelete(assistant.id)}
-                />
+                {deleteConfirmId === assistant.id ? (
+                  <div className="card-confirm-bar">
+                    <span className="card-confirm-label">Delete permanently?</span>
+                    <Button kind="danger" size="sm" onClick={() => handleDelete(assistant.id)}>
+                      Confirm
+                    </Button>
+                    <Button kind="ghost" size="sm" onClick={() => setDeleteConfirmId(null)}>
+                      Cancel
+                    </Button>
+                  </div>
+                ) : (
+                  <Button
+                    kind="danger--ghost"
+                    size="sm"
+                    hasIconOnly
+                    renderIcon={TrashCan}
+                    iconDescription="Delete assistant"
+                    onClick={() => handleDelete(assistant.id)}
+                  />
+                )}
               </div>
+
+              {cardErrors[assistant.id] && (
+                <p className="card-inline-error">
+                  <WarningFilled size={14} /> {cardErrors[assistant.id]}
+                </p>
+              )}
             </Tile>
           ))}
         </div>
       )}
 
-      {/* ------------------------------------------------------------------ */}
-      {/* Explainer                                                           */}
-      {/* ------------------------------------------------------------------ */}
+      {/* Explainer */}
       <div className="assistants-explainer">
         <h4>How it works</h4>
         <div className="explainer-steps">
