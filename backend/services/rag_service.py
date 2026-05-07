@@ -82,6 +82,7 @@ SKIP_DIRS = {
     ".next", ".nuxt", "venv", ".venv", ".env", "env", "coverage",
     ".pytest_cache", ".mypy_cache", "target", "out",
     ".idea", ".vscode", "__snapshots__", ".turbo", ".cache",
+    "chroma_db",
 }
 
 # Chunking parameters
@@ -94,6 +95,10 @@ MAX_FILE_BYTES = 500_000  # skip files larger than 500 KB
 # ---------------------------------------------------------------------------
 
 _chroma_client: Optional[chromadb.PersistentClient] = None
+
+# Serializes ChromaDB writes — SQLite under the hood can't handle concurrent
+# writes from multiple asyncio.to_thread calls without "database is locked" errors.
+_chroma_write_lock = asyncio.Lock()
 
 
 def get_chroma_client() -> chromadb.PersistentClient:
@@ -234,7 +239,7 @@ def collect_files(codebase_path: str) -> list[Path]:
     Walk the directory tree and return all indexable source files,
     skipping build artifacts, dependencies, and oversized files.
     """
-    root = Path(codebase_path)
+    root = Path(codebase_path).expanduser().resolve()
     if not root.exists():
         raise ValueError(f"Path does not exist: {codebase_path}")
 
@@ -242,8 +247,11 @@ def collect_files(codebase_path: str) -> list[Path]:
     for path in root.rglob("*"):
         if not path.is_file():
             continue
-        # Skip if any ancestor directory is in the blocklist
-        if any(part in SKIP_DIRS for part in path.parts):
+        # Check only parts relative to root so parent dirs outside the
+        # codebase (e.g. a "build" or "env" folder in the user's home) don't
+        # accidentally block everything.
+        rel = path.relative_to(root)
+        if any(part in SKIP_DIRS for part in rel.parts):
             continue
         if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
             continue
@@ -390,21 +398,22 @@ async def index_codebase(
                 for i in range(0, len(texts), EMBED_BATCH_SIZE):
                     all_embeddings.extend(await embed_texts_batch(texts[i : i + EMBED_BATCH_SIZE]))
 
-                await asyncio.to_thread(
-                    collection.add,
-                    ids=[str(uuid.uuid4()) for _ in chunks],
-                    embeddings=all_embeddings,
-                    documents=texts,
-                    metadatas=[
-                        {
-                            "file": c["file"],
-                            "start_line": c["start_line"],
-                            "end_line": c["end_line"],
-                            "hash": content_hash,   # stored for future incremental runs
-                        }
-                        for c in chunks
-                    ],
-                )
+                async with _chroma_write_lock:
+                    await asyncio.to_thread(
+                        collection.add,
+                        ids=[str(uuid.uuid4()) for _ in chunks],
+                        embeddings=all_embeddings,
+                        documents=texts,
+                        metadatas=[
+                            {
+                                "file": c["file"],
+                                "start_line": c["start_line"],
+                                "end_line": c["end_line"],
+                                "hash": content_hash,
+                            }
+                            for c in chunks
+                        ],
+                    )
 
                 state["done"] += 1
                 state["new_chunks"] += len(chunks)
@@ -428,6 +437,23 @@ async def index_codebase(
         "total_chunks": total_chunks,
         "total_files": total_files,
     }
+
+
+# ---------------------------------------------------------------------------
+# File manifest
+# ---------------------------------------------------------------------------
+
+def get_indexed_files(assistant_id: str) -> list[str]:
+    """Return the sorted list of unique file paths stored in this assistant's index."""
+    try:
+        data = get_collection(assistant_id).get(include=["metadatas"])
+        seen: set[str] = set()
+        for meta in (data.get("metadatas") or []):
+            if meta and meta.get("file"):
+                seen.add(meta["file"])
+        return sorted(seen)
+    except Exception:
+        return []
 
 
 # ---------------------------------------------------------------------------
