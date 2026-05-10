@@ -6,7 +6,7 @@ from pymongo import MongoClient
 load_dotenv()
 
 MONGODB_URL = os.getenv("MONGODB_URL")
-MONGODB_DB = os.getenv("MONGODB_DB", "ollama-idea-test")
+MONGODB_DB = os.getenv("MONGODB_DB", "hivemind")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
 client = MongoClient(MONGODB_URL, serverSelectionTimeoutMS=5000)
