@@ -116,6 +116,29 @@ async def get_assistant(assistant_id: str):
     return result
 
 
+@router.patch("/{assistant_id}", response_model=schemas.AssistantInfo)
+async def update_assistant(assistant_id: str, req: schemas.AssistantUpdateRequest):
+    """Update name, description, or codebase_path of an existing assistant."""
+    doc = database.assistants_collection.find_one({"_id": assistant_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Assistant not found")
+
+    updates: dict = {"updated_at": datetime.now(timezone.utc)}
+    if req.name is not None:
+        updates["name"] = req.name
+    if req.description is not None:
+        updates["description"] = req.description
+    if req.codebase_path is not None:
+        updates["codebase_path"] = req.codebase_path
+
+    database.assistants_collection.update_one({"_id": assistant_id}, {"$set": updates})
+    doc = database.assistants_collection.find_one({"_id": assistant_id})
+    result = _serialize(doc)
+    if assistant_id in _index_status:
+        result["index_status"] = _index_status[assistant_id].get("status", result["index_status"])
+    return result
+
+
 @router.delete("/{assistant_id}")
 async def delete_assistant(assistant_id: str):
     """

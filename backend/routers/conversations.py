@@ -21,6 +21,8 @@ async def create_conversation(
     temperature: float = 0.7,
     top_p: float = 0.9,
     max_tokens: int = 512,
+    assistant_id: Optional[str] = None,
+    assistant_name: Optional[str] = None,
 ):
     data = payload or schemas.ConversationCreateRequest(
         title=title,
@@ -28,6 +30,8 @@ async def create_conversation(
         temperature=temperature,
         top_p=top_p,
         max_tokens=max_tokens,
+        assistant_id=assistant_id,
+        assistant_name=assistant_name,
     )
     conv = conversation_service.create_conversation(
         db,
@@ -36,6 +40,8 @@ async def create_conversation(
         temperature=data.temperature,
         top_p=data.top_p,
         max_tokens=data.max_tokens,
+        assistant_id=data.assistant_id,
+        assistant_name=data.assistant_name,
     )
     return schemas.ConversationInfo(
         id=conv["id"], title=conv["title"], model_name=conv["model_name"],
@@ -43,6 +49,8 @@ async def create_conversation(
         max_tokens=conv["max_tokens"], created_at=conv["created_at"],
         updated_at=conv["updated_at"], archived=conv["archived"],
         message_count=0,
+        assistant_id=conv.get("assistant_id"),
+        assistant_name=conv.get("assistant_name"),
     )
 
 
@@ -57,6 +65,8 @@ async def list_conversations(db = Depends(database.get_db), limit: int = 50):
             max_tokens=c["max_tokens"], created_at=c["created_at"],
             updated_at=c["updated_at"], archived=c["archived"],
             message_count=c["message_count"],
+            assistant_id=c.get("assistant_id"),
+            assistant_name=c.get("assistant_name"),
         ))
     return result
 
