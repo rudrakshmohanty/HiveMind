@@ -1,5 +1,5 @@
 """
-FastAPI backend for the Ollama Chat application.
+FastAPI backend for HiveMind.
 
 Endpoints:
     - /api/health      - Health check
@@ -19,7 +19,7 @@ except ImportError:
     from database import ensure_indexes
     from routers import assistants, chat, conversations, health
 
-app = FastAPI(title="Ollama Chat", version="0.1.0")
+app = FastAPI(title="HiveMind", version="0.1.0")
 
 # CORS for local dev
 app.add_middleware(

@@ -13,6 +13,8 @@ class ChatRequest(BaseModel):
     # When set, the chat router will retrieve relevant code chunks from this
     # assistant's vector index and inject them as system context.
     assistant_id: Optional[str] = None
+    # Base64-encoded images for multimodal models (e.g. llava). Never persisted to DB.
+    images: Optional[List[str]] = None
 
 
 class ConversationCreateRequest(BaseModel):
@@ -21,6 +23,8 @@ class ConversationCreateRequest(BaseModel):
     temperature: float = Field(0.7, ge=0, le=1)
     top_p: float = Field(0.9, ge=0, le=1)
     max_tokens: int = Field(512, ge=1)
+    assistant_id: Optional[str] = None
+    assistant_name: Optional[str] = None
 
 
 class ConversationUpdateRequest(BaseModel):
@@ -54,6 +58,8 @@ class ConversationInfo(BaseModel):
     updated_at: datetime
     archived: bool
     message_count: int
+    assistant_id: Optional[str] = None
+    assistant_name: Optional[str] = None
 
 class ConversationDetail(BaseModel):
     model_config = ConfigDict(from_attributes=True, protected_namespaces=())
@@ -91,6 +97,12 @@ class AssistantCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     description: Optional[str] = ""
     codebase_path: str = Field(..., min_length=1)
+
+
+class AssistantUpdateRequest(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    description: Optional[str] = None
+    codebase_path: Optional[str] = Field(default=None, min_length=1)
 
 
 class AssistantInfo(BaseModel):

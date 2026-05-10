@@ -19,6 +19,8 @@ def _serialize_conversation(doc: dict) -> dict:
         "created_at": doc.get("created_at"),
         "updated_at": doc.get("updated_at"),
         "archived": doc.get("archived", False),
+        "assistant_id": doc.get("assistant_id"),
+        "assistant_name": doc.get("assistant_name"),
     }
 
 
@@ -36,7 +38,8 @@ def _serialize_message(doc: dict) -> dict:
 
 
 def create_conversation(db, title: str = "New Chat", model: str = "mistral",
-                        temperature: float = 0.7, top_p: float = 0.9, max_tokens: int = 512) -> dict:
+                        temperature: float = 0.7, top_p: float = 0.9, max_tokens: int = 512,
+                        assistant_id: Optional[str] = None, assistant_name: Optional[str] = None) -> dict:
     conv_id = str(uuid.uuid4())
     now = datetime.utcnow()
     conv_doc = {
@@ -49,6 +52,8 @@ def create_conversation(db, title: str = "New Chat", model: str = "mistral",
         "created_at": now,
         "updated_at": now,
         "archived": False,
+        "assistant_id": assistant_id,
+        "assistant_name": assistant_name,
     }
     conversations_collection.insert_one(conv_doc)
     return _serialize_conversation(conv_doc)

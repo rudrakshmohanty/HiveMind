@@ -13,8 +13,11 @@ async def get_available_models() -> list[dict]:
         return data.get("models", [])
 
 
+_CHAT_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=30.0, pool=5.0)
+
+
 async def chat_completion(request_data: dict) -> dict:
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=_CHAT_TIMEOUT) as client:
         resp = await client.post(
             f"{OLLAMA_BASE_URL}/api/chat",
             json=request_data,
@@ -24,7 +27,7 @@ async def chat_completion(request_data: dict) -> dict:
 
 
 async def stream_chat(request_data: dict) -> AsyncGenerator[str, None]:
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=_CHAT_TIMEOUT) as client:
         async with client.stream("POST", f"{OLLAMA_BASE_URL}/api/chat", json=request_data) as resp:
             resp.raise_for_status()
             async for line in resp.aiter_lines():

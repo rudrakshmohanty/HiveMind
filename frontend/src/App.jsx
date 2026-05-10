@@ -5,14 +5,16 @@ import {
   Button,
   Select,
   SelectItem,
-  Tag,
   TextInput,
 } from '@carbon/react';
 import {
   Add,
+  Attachment,
   Bot,
   Chat,
   Checkmark,
+  Close,
+  Edit,
   Light,
   Menu,
   Moon,
@@ -31,13 +33,14 @@ import {
   fetchConversations,
   fetchModels,
   fetchStatus,
+  renameConversation,
   sendMessageStream,
 } from './api';
 import AssistantsPage from './AssistantsPage';
 import './index.scss';
 
 const API_BASE = '/api';
-const THEME_STORAGE_KEY = 'ollama-chat-theme';
+const THEME_STORAGE_KEY = 'hivemind-theme';
 
 const DEFAULT_SETTINGS = {
   temperature: 0.7,
@@ -47,12 +50,36 @@ const DEFAULT_SETTINGS = {
 
 const SUGGESTED_PROMPTS = [
   'Explain this code to me',
-  'Write a Python script that...',
-  'What are the best practices for...',
-  'Debug this error: ...',
-  'Summarize the key points of...',
-  'Help me write a regex that...',
+  'Write a Python script that…',
+  'What are the best practices for…',
+  'Help me debug this error: …',
+  'Summarise the key points of…',
+  'Write a regex that matches…',
+  'How does this algorithm work?',
+  'Review my code for issues',
 ];
+
+const MULTIMODAL_PATTERNS = /llava|moondream|bakllava|minicpm.?v|cogvlm|internvl|phi.*vision|vision|gemma4|nemotron3/i;
+
+const STATUS_TAG_TYPE = { ok: 'green', warn: 'yellow', error: 'red' };
+
+function HiveMindLogo() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path d="M2.5 13V3H5L8 7.5L11 3H13.5V13H11V7L8 11L5 7V13H2.5Z" fill="white" />
+    </svg>
+  );
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function getErrorMessage(error, fallback) {
+  return error instanceof Error ? error.message : fallback;
+}
+
+function isMultimodalModel(modelName) {
+  return MULTIMODAL_PATTERNS.test(modelName || '');
+}
 
 function formatTime(value) {
   if (!value) return '';
@@ -85,15 +112,8 @@ function conversationTitle(conversation) {
 function buildConversationTitle(messageText) {
   const cleaned = messageText.trim().replace(/\s+/g, ' ');
   if (!cleaned) return 'New chat';
-
   const title = cleaned.slice(0, 50);
   return title.length < cleaned.length ? `${title.trimEnd()}...` : title;
-}
-
-function statusTagType(status) {
-  if (status === 'ok') return 'green';
-  if (status === 'warn') return 'yellow';
-  return 'red';
 }
 
 function groupConversationsByDate(conversations) {
@@ -108,25 +128,46 @@ function groupConversationsByDate(conversations) {
   return groups;
 }
 
-function CodeBlock({ children }) {
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => resolve(e.target.result);
+    reader.onerror = () => reject(new Error(`Failed to read ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
+// ─── Hooks ───────────────────────────────────────────────────────────────────
+
+function useCopyToClipboard(timeout = 2000) {
   const [copied, setCopied] = useState(false);
+  const copy = (text) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), timeout);
+    }).catch(() => {});
+  };
+  return [copied, copy];
+}
+
+// ─── Components ──────────────────────────────────────────────────────────────
+
+function StreamingCursor() {
+  return <span className="streaming-cursor" aria-hidden="true" />;
+}
+
+function CodeBlock({ children }) {
+  const [copied, copy] = useCopyToClipboard();
   const codeEl = children?.props;
   const codeText = String(codeEl?.children ?? '').trimEnd();
   const langClass = codeEl?.className ?? '';
   const lang = langClass.replace('language-', '') || null;
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(codeText).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }).catch(() => {});
-  };
-
   return (
     <div className="md-code-block">
       <div className="code-block-header">
         {lang ? <span className="code-lang-label">{lang}</span> : <span />}
-        <button className="code-copy-btn" onClick={handleCopy} aria-label="Copy code">
+        <button className="code-copy-btn" onClick={() => copy(codeText)} aria-label="Copy code">
           {copied ? <><Checkmark size={13} /> Copied!</> : 'Copy'}
         </button>
       </div>
@@ -136,16 +177,9 @@ function CodeBlock({ children }) {
 }
 
 function MessageBubble({ message, isStreaming }) {
-  const [msgCopied, setMsgCopied] = useState(false);
+  const [msgCopied, copyMsg] = useCopyToClipboard();
   const isUser = message.role === 'user';
   const showTyping = isStreaming && !message.content && !isUser;
-
-  const handleMsgCopy = () => {
-    navigator.clipboard.writeText(message.content || '').then(() => {
-      setMsgCopied(true);
-      setTimeout(() => setMsgCopied(false), 2000);
-    }).catch(() => {});
-  };
 
   return (
     <article className={`bubble ${isUser ? 'bubble-user' : 'bubble-assistant'}`}>
@@ -154,52 +188,132 @@ function MessageBubble({ message, isStreaming }) {
       </div>
       <div className="bubble-body">
         <div className="bubble-meta">
-          <span>{isUser ? 'You' : message.model || 'Assistant'}</span>
+          <span>{isUser ? 'You' : message.model || 'AI'}</span>
+          {isStreaming && !isUser && message.content && (
+            <span className="streaming-label">responding…</span>
+          )}
           <span>{formatTime(message.created_at)}</span>
         </div>
         <div className={`bubble-content ${isUser ? 'bubble-content-user' : 'markdown-content'}`}>
+          {isUser && message.images?.length > 0 && (
+            <div className="bubble-images">
+              {message.images.map((src, i) => (
+                <img key={src} src={src} alt={`attachment ${i + 1}`} className="bubble-image" />
+              ))}
+            </div>
+          )}
           {isUser ? (
             message.content
           ) : showTyping ? (
             <div className="typing-indicator" aria-label="Generating response">
               <span /><span /><span />
-              <span className="typing-label">Generating…</span>
+              <span className="typing-label">Thinking…</span>
             </div>
           ) : (
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              components={{
-                a: ({ href, children }) => (
-                  <a href={href} target="_blank" rel="noreferrer">
-                    {children}
-                  </a>
-                ),
-                pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
-                code: ({ inline, className, children, ...props }) =>
-                  inline ? (
-                    <code className="md-inline-code" {...props}>
+            <>
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  a: ({ href, children }) => (
+                    <a href={href} target="_blank" rel="noreferrer">
                       {children}
-                    </code>
-                  ) : (
-                    <code className={className} {...props}>
-                      {children}
-                    </code>
+                    </a>
                   ),
-              }}
-            >
-              {message.content || ''}
-            </ReactMarkdown>
+                  pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
+                  code: ({ inline, className, children, ...props }) =>
+                    inline ? (
+                      <code className="md-inline-code" {...props}>
+                        {children}
+                      </code>
+                    ) : (
+                      <code className={className} {...props}>
+                        {children}
+                      </code>
+                    ),
+                }}
+              >
+                {message.content || ''}
+              </ReactMarkdown>
+              {isStreaming && <StreamingCursor />}
+            </>
           )}
         </div>
       </div>
       <button
         className="bubble-copy-btn"
-        onClick={handleMsgCopy}
+        onClick={() => copyMsg(message.content || '')}
         aria-label="Copy message"
       >
         {msgCopied ? <><Checkmark size={13} /> Copied!</> : 'Copy'}
       </button>
     </article>
+  );
+}
+
+function ConversationCard({ conversation, isActive, renaming, onSelect, onRenameStart, onRenameChange, onRenameSubmit, onRenameCancel, onDelete }) {
+  const isRenaming = renaming.id === conversation.id;
+
+  return (
+    <div
+      className={`conversation-card ${isActive ? 'conversation-card-active' : ''}`}
+      role="button"
+      tabIndex={0}
+      onClick={() => !isRenaming && onSelect(conversation.id)}
+      onKeyDown={(event) => {
+        if (isRenaming) return;
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onSelect(conversation.id);
+        }
+      }}
+    >
+      <div className="conversation-card-main">
+        {isRenaming ? (
+          <input
+            className="rename-input"
+            value={renaming.value}
+            onChange={(e) => onRenameChange(e.target.value)}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === 'Enter') onRenameSubmit(conversation.id);
+              if (e.key === 'Escape') onRenameCancel();
+            }}
+            onBlur={() => onRenameSubmit(conversation.id)}
+            autoFocus
+            onClick={(e) => e.stopPropagation()}
+          />
+        ) : (
+          <div className="conversation-card-title">{conversationTitle(conversation)}</div>
+        )}
+        <div className="conversation-card-meta">
+          <span>{conversation.message_count ?? 0} messages</span>
+          <span>{formatTime(conversation.updated_at)}</span>
+        </div>
+      </div>
+      <div className="conv-card-actions">
+        {!isRenaming && (
+          <Button
+            kind="ghost"
+            size="sm"
+            hasIconOnly
+            renderIcon={Edit}
+            iconDescription="Rename"
+            onClick={(event) => {
+              event.stopPropagation();
+              onRenameStart(conversation.id, conversationTitle(conversation));
+            }}
+          />
+        )}
+        <Button
+          kind="ghost"
+          size="sm"
+          hasIconOnly
+          renderIcon={TrashCan}
+          iconDescription={`Delete ${conversationTitle(conversation)}`}
+          onClick={(event) => onDelete(event, conversation.id)}
+        />
+      </div>
+    </div>
   );
 }
 
@@ -210,11 +324,11 @@ function EmptyState({ status, modelSummary, conversationCount, onSuggestPrompt }
       <div className="empty-state-icon-wrap">
         <div className="empty-state-icon-bg" aria-hidden="true" />
         <div className="empty-state-icon">
-          <Script size={32} />
+          <Bot size={30} />
         </div>
       </div>
-      <h2>Ollama Chat</h2>
-      <p className="empty-state-desc">Your local AI, fully private. Pick a model and start a conversation.</p>
+      <h2>What can I help you with?</h2>
+      <p className="empty-state-desc">HiveMind runs entirely on your machine — your conversations never leave your device.</p>
       <div className="empty-state-meta">
         <span className={`empty-meta-chip chip-${status}`}>
           <span className={`status-dot status-${status}`} /> {statusLabel}
@@ -241,6 +355,179 @@ function EmptyState({ status, modelSummary, conversationCount, onSuggestPrompt }
   );
 }
 
+// ─── Quick Chat Drawer ───────────────────────────────────────────────────────
+
+function QuickChatDrawer({ assistant, selectedModel, settings, onClose, onOpenFull }) {
+  const [messages, setMessages] = useState([]);
+  const [convId, setConvId] = useState(null);
+  const [composerValue, setComposerValue] = useState('');
+  const [sending, setSending] = useState(false);
+  const messagesEndRef = useRef(null);
+  const composerRef = useRef(null);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  const handleSend = async () => {
+    const text = composerValue.trim();
+    if (!text || sending) return;
+    setSending(true);
+    setComposerValue('');
+
+    const userMsg = { id: `${Date.now()}-user`, role: 'user', content: text, created_at: new Date().toISOString() };
+    const seed = { id: 'streaming', role: 'assistant', content: '', created_at: new Date().toISOString() };
+    setMessages((curr) => [...curr, userMsg, seed]);
+
+    try {
+      let cid = convId;
+      if (!cid) {
+        const conv = await createConversation(API_BASE, {
+          title: text.slice(0, 50),
+          model: selectedModel,
+          temperature: settings.temperature,
+          top_p: settings.topP,
+          max_tokens: settings.maxTokens,
+          assistant_id: assistant.id,
+          assistant_name: assistant.name,
+        });
+        cid = conv.id;
+        setConvId(cid);
+      }
+
+      const stream = await sendMessageStream(API_BASE, {
+        conversation_id: cid,
+        message: text,
+        model: selectedModel,
+        temperature: settings.temperature,
+        top_p: settings.topP,
+        max_tokens: settings.maxTokens,
+        assistant_id: assistant.id,
+      });
+
+      const reader = stream.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let content = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const frames = buffer.split('\n\n');
+        buffer = frames.pop() || '';
+        for (const frame of frames) {
+          const line = frame.split('\n').find((l) => l.startsWith('data: '));
+          if (!line) continue;
+          try {
+            const payload = JSON.parse(line.slice(6));
+            if (!payload.content) continue;
+            content += payload.content;
+            setMessages((curr) => {
+              const next = [...curr];
+              const idx = next.findIndex((m) => m.id === 'streaming');
+              if (idx === -1) return curr;
+              next[idx] = { ...next[idx], content };
+              return next;
+            });
+          } catch { continue; }
+        }
+      }
+    } catch (err) {
+      setMessages((curr) => {
+        const next = [...curr];
+        const idx = next.findIndex((m) => m.id === 'streaming');
+        if (idx !== -1) next[idx] = { ...next[idx], content: `Error: ${err.message}` };
+        return next;
+      });
+    } finally {
+      setSending(false);
+      composerRef.current?.focus();
+    }
+  };
+
+  return (
+    <div className="quick-chat-drawer">
+      <div className="quick-chat-header">
+        <div className="quick-chat-header-info">
+          <div className="quick-chat-avatar"><Bot size={14} /></div>
+          <div>
+            <p className="quick-chat-assistant-name">{assistant.name}</p>
+            <p className="quick-chat-assistant-hint">Codebase assistant</p>
+          </div>
+        </div>
+        <div className="quick-chat-header-actions">
+          <button className="qc-icon-btn" title="Open full chat" onClick={() => onOpenFull(assistant)}>
+            <Script size={14} />
+          </button>
+          <button className="qc-icon-btn" title="Close" onClick={onClose}>
+            <Close size={14} />
+          </button>
+        </div>
+      </div>
+
+      <div className="quick-chat-messages">
+        {messages.length === 0 ? (
+          <div className="quick-chat-empty">
+            <Bot size={28} />
+            <p>Chat with <strong>{assistant.name}</strong></p>
+            <p className="qc-hint">Responses are grounded in the indexed codebase</p>
+          </div>
+        ) : (
+          messages.map((msg) => (
+            <div key={msg.id} className={`qc-msg qc-msg-${msg.role}`}>
+              {msg.role === 'assistant' && !msg.content && sending ? (
+                <div className="typing-indicator" aria-label="Thinking">
+                  <span /><span /><span />
+                </div>
+              ) : msg.role === 'user' ? (
+                <span>{msg.content}</span>
+              ) : (
+                <>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}
+                    components={{
+                      pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
+                      code: ({ inline, className, children, ...props }) =>
+                        inline ? <code className="md-inline-code" {...props}>{children}</code>
+                              : <code className={className} {...props}>{children}</code>,
+                    }}
+                  >{msg.content}</ReactMarkdown>
+                  {sending && msg.id === 'streaming' && msg.content && <StreamingCursor />}
+                </>
+              )}
+            </div>
+          ))
+        )}
+        <div ref={messagesEndRef} />
+      </div>
+
+      <div className="quick-chat-composer">
+        <textarea
+          ref={composerRef}
+          className="qc-textarea"
+          placeholder="Ask about the codebase…"
+          value={composerValue}
+          onChange={(e) => setComposerValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
+          }}
+          rows={1}
+        />
+        <button
+          className="qc-send-btn"
+          disabled={!composerValue.trim() || sending}
+          onClick={handleSend}
+          aria-label="Send"
+        >
+          <Send size={14} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── App ─────────────────────────────────────────────────────────────────────
+
 export default function App() {
   const [view, setView] = useState('chat');
   const [activeAssistantId, setActiveAssistantId] = useState(null);
@@ -258,19 +545,23 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sending, setSending] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [renaming, setRenaming] = useState({ id: null, value: '' });
   const [theme, setTheme] = useState(() => {
     const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
     if (storedTheme === 'light' || storedTheme === 'dark') return storedTheme;
     return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   });
   const [settings, setSettings] = useState(() => {
-    const stored = window.localStorage.getItem('ollama-chat-settings');
+    const stored = window.localStorage.getItem('hivemind-settings');
     return stored ? { ...DEFAULT_SETTINGS, ...JSON.parse(stored) } : DEFAULT_SETTINGS;
   });
+  const [attachedImages, setAttachedImages] = useState([]);
+  const [quickChatAssistant, setQuickChatAssistant] = useState(null);
 
   const messagesEndRef = useRef(null);
   const conversationListRef = useRef(null);
   const composerRef = useRef(null);
+  const imageInputRef = useRef(null);
 
   const focusComposer = () => composerRef.current?.focus();
 
@@ -285,19 +576,24 @@ export default function App() {
   };
 
   const activeConversation = useMemo(
-    () => conversations.find((conversation) => conversation.id === activeConversationId) || null,
+    () => conversations.find((c) => c.id === activeConversationId) || null,
     [conversations, activeConversationId],
   );
 
   const filteredConversations = useMemo(() => {
     const term = searchTerm.trim().toLowerCase();
     if (!term) return conversations;
-    return conversations.filter((conversation) => conversationTitle(conversation).toLowerCase().includes(term));
+    return conversations.filter((c) => conversationTitle(c).toLowerCase().includes(term));
   }, [conversations, searchTerm]);
+
+  const modelSummary = useMemo(
+    () => models.find((m) => m.name === selectedModel) || models[0] || null,
+    [models, selectedModel],
+  );
 
   const persistSettings = (nextSettings) => {
     setSettings(nextSettings);
-    window.localStorage.setItem('ollama-chat-settings', JSON.stringify(nextSettings));
+    window.localStorage.setItem('hivemind-settings', JSON.stringify(nextSettings));
   };
 
   const refreshConversations = async () => {
@@ -309,7 +605,7 @@ export default function App() {
     const data = await fetchModels(API_BASE);
     const availableModels = data.models || [];
     setModels(availableModels);
-    if (availableModels.length > 0 && !availableModels.some((model) => model.name === selectedModel)) {
+    if (availableModels.length > 0 && !availableModels.some((m) => m.name === selectedModel)) {
       setSelectedModel(availableModels[0].name);
     }
   };
@@ -343,16 +639,14 @@ export default function App() {
         if (!cancelled) {
           setStatus('error');
           setStatusDetail('Unable to reach the backend');
-          setErrorMessage(error instanceof Error ? error.message : 'Unable to load app data');
+          setErrorMessage(getErrorMessage(error, 'Unable to load app data'));
         }
       }
     };
 
     load();
 
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
@@ -365,22 +659,31 @@ export default function App() {
 
   useEffect(() => {
     const keyHandler = (event) => {
-      if (event.key === 'Escape' && settingsOpen) {
-        setSettingsOpen(false);
-      }
+      if (event.key === 'Escape' && settingsOpen) setSettingsOpen(false);
     };
-
     window.addEventListener('keydown', keyHandler);
     return () => window.removeEventListener('keydown', keyHandler);
   }, [settingsOpen]);
 
-  const handleNewConversation = async () => {
+  const handleModelChange = (event) => {
+    const next = event.target.value;
+    setSelectedModel(next);
+    if (!isMultimodalModel(next) && attachedImages.length > 0) {
+      setAttachedImages([]);
+    }
+  };
+
+  const resetChatState = () => {
     setActiveConversationId(null);
-    setActiveAssistantId(null);
-    setActiveAssistantName(null);
     setMessages([]);
     setComposerValue('');
     setErrorMessage('');
+  };
+
+  const handleNewConversation = () => {
+    resetChatState();
+    setActiveAssistantId(null);
+    setActiveAssistantName(null);
     setSidebarOpen(false);
     focusComposer();
     setTimeout(() => {
@@ -389,18 +692,18 @@ export default function App() {
   };
 
   const handleOpenAssistantChat = (assistant) => {
+    resetChatState();
     setActiveAssistantId(assistant.id);
     setActiveAssistantName(assistant.name);
-    setActiveConversationId(null);
-    setMessages([]);
-    setComposerValue('');
-    setErrorMessage('');
     setView('chat');
     setSidebarOpen(false);
     focusComposer();
   };
 
   const handleSelectConversation = async (conversationId) => {
+    const conv = conversations.find((c) => c.id === conversationId);
+    setActiveAssistantId(conv?.assistant_id || null);
+    setActiveAssistantName(conv?.assistant_name || null);
     setActiveConversationId(conversationId);
     setSidebarOpen(false);
     setErrorMessage('');
@@ -408,23 +711,42 @@ export default function App() {
     try {
       await syncConversation(conversationId);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Unable to load conversation');
+      setErrorMessage(getErrorMessage(error, 'Unable to load conversation'));
       setMessages([]);
     }
   };
 
   const handleDeleteConversation = async (event, conversationId) => {
     event.stopPropagation();
-
     try {
       await deleteConversation(API_BASE, conversationId);
-      setConversations((current) => current.filter((conversation) => conversation.id !== conversationId));
+      setConversations((current) => current.filter((c) => c.id !== conversationId));
       if (activeConversationId === conversationId) {
         setActiveConversationId(null);
         setMessages([]);
       }
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Unable to delete conversation');
+      setErrorMessage(getErrorMessage(error, 'Unable to delete conversation'));
+    }
+  };
+
+  const handleRenameStart = (conversationId, currentTitle) => {
+    setRenaming({ id: conversationId, value: currentTitle });
+  };
+
+  const handleRenameSubmit = async (conversationId) => {
+    const newTitle = renaming.value.trim();
+    setRenaming({ id: null, value: '' });
+    if (!newTitle) return;
+    const existing = conversations.find((c) => c.id === conversationId);
+    if (existing && newTitle === conversationTitle(existing)) return;
+    try {
+      await renameConversation(API_BASE, conversationId, newTitle);
+      setConversations((current) =>
+        current.map((c) => (c.id === conversationId ? { ...c, title: newTitle } : c)),
+      );
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error, 'Failed to rename conversation'));
     }
   };
 
@@ -437,21 +759,49 @@ export default function App() {
       temperature: settings.temperature,
       top_p: settings.topP,
       max_tokens: settings.maxTokens,
+      ...(activeAssistantId ? { assistant_id: activeAssistantId, assistant_name: activeAssistantName } : {}),
     });
 
-    setConversations((current) => [conversation, ...current.filter((item) => item.id !== conversation.id)]);
+    setConversations((current) => [conversation, ...current.filter((c) => c.id !== conversation.id)]);
     setActiveConversationId(conversation.id);
     return conversation.id;
+  };
+
+  const handleImageAttach = async (event) => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = '';
+    if (!files.length) return;
+
+    try {
+      const dataUrls = await Promise.all(files.map(readFileAsDataUrl));
+      const newImages = dataUrls.map((dataUrl, i) => ({
+        id: `img-${Date.now()}-${i}`,
+        dataUrl,
+        base64: dataUrl.split(',')[1],
+      }));
+      setAttachedImages((current) => [...current, ...newImages]);
+    } catch {
+      setErrorMessage('Failed to read one or more images');
+    }
+  };
+
+  const handleRemoveImage = (id) => {
+    setAttachedImages((current) => current.filter((img) => img.id !== id));
   };
 
   const handleSend = async () => {
     const text = composerValue.trim();
     if (!text || sending) return;
 
+    const imagesToSend = [...attachedImages];
+    const imageDataUrls = imagesToSend.map((img) => img.dataUrl);
+    const imageBase64List = imagesToSend.map((img) => img.base64);
+
     setSending(true);
     setErrorMessage('');
     setSettingsOpen(false);
     setComposerValue('');
+    setAttachedImages([]);
     resetComposerHeight();
 
     let conversationId;
@@ -466,6 +816,7 @@ export default function App() {
         model: selectedModel,
         created_at: new Date().toISOString(),
         conversation_id: conversationId,
+        images: imageDataUrls.length > 0 ? imageDataUrls : undefined,
       };
 
       const assistantSeed = {
@@ -487,11 +838,10 @@ export default function App() {
         top_p: settings.topP,
         max_tokens: settings.maxTokens,
         ...(activeAssistantId ? { assistant_id: activeAssistantId } : {}),
+        ...(imageBase64List.length > 0 ? { images: imageBase64List } : {}),
       });
 
-      if (!stream) {
-        throw new Error('Streaming response is unavailable');
-      }
+      if (!stream) throw new Error('Streaming response is unavailable');
 
       const reader = stream.getReader();
       const decoder = new TextDecoder();
@@ -516,9 +866,9 @@ export default function App() {
             assistantContent += payload.content;
             setMessages((current) => {
               const next = [...current];
-              const streamIndex = next.findIndex((item) => item.id === 'streaming-assistant');
-              if (streamIndex === -1) return current;
-              next[streamIndex] = { ...next[streamIndex], content: assistantContent };
+              const idx = next.findIndex((item) => item.id === 'streaming-assistant');
+              if (idx === -1) return current;
+              next[idx] = { ...next[idx], content: assistantContent };
               return next;
             });
           } catch {
@@ -530,17 +880,12 @@ export default function App() {
       await Promise.all([refreshConversations(), syncConversation(conversationId)]);
       setActiveConversationId(conversationId);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unable to send message';
+      const message = getErrorMessage(error, 'Unable to send message');
       setErrorMessage(message);
       setMessages((current) => {
         const next = [...current];
-        const streamIndex = next.findIndex((item) => item.id === 'streaming-assistant');
-        if (streamIndex !== -1) {
-          next[streamIndex] = {
-            ...next[streamIndex],
-            content: `Error: ${message}`,
-          };
-        }
+        const idx = next.findIndex((item) => item.id === 'streaming-assistant');
+        if (idx !== -1) next[idx] = { ...next[idx], content: `Error: ${message}` };
         return next;
       });
     } finally {
@@ -556,11 +901,6 @@ export default function App() {
     }
   };
 
-  const handleSettingsSave = () => {
-    persistSettings(settings);
-    setSettingsOpen(false);
-  };
-
   const handleThemeToggle = () => {
     setTheme((current) => {
       const next = current === 'dark' ? 'light' : 'dark';
@@ -569,24 +909,57 @@ export default function App() {
     });
   };
 
-  const modelSummary = models.find((model) => model.name === selectedModel) || models[0] || null;
+  // ─── Derived render values ───────────────────────────────────────────────
+
+  const assistantConvs = filteredConversations.filter((c) => c.assistant_id);
+  const regularConvs = filteredConversations.filter((c) => !c.assistant_id);
+  const regularGroups = groupConversationsByDate(regularConvs);
+
+  const headerEyebrow = view === 'assistants'
+    ? 'RAG — Codespace Assistants'
+    : activeAssistantName
+      ? `Assistant · ${activeAssistantName}`
+      : 'HiveMind · Local inference';
+
+  const headerTitle = view === 'assistants'
+    ? 'Assistants'
+    : activeConversation
+      ? conversationTitle(activeConversation)
+      : 'New chat';
+
+  const canAttachImage = isMultimodalModel(selectedModel) && !sending;
+  const attachTooltip = canAttachImage
+    ? 'Attach image — processed locally, never uploaded'
+    : 'Select a multimodal model (e.g. llava) to attach images';
+
+  const renamingProps = {
+    renaming,
+    onSelect: handleSelectConversation,
+    onRenameStart: handleRenameStart,
+    onRenameChange: (value) => setRenaming((r) => ({ ...r, value })),
+    onRenameSubmit: handleRenameSubmit,
+    onRenameCancel: () => setRenaming({ id: null, value: '' }),
+    onDelete: handleDeleteConversation,
+  };
 
   return (
     <div className={`app-shell ${sidebarOpen ? 'sidebar-open' : 'sidebar-closed'}`}>
       <aside className="sidebar">
         <div className="sidebar-top">
           <div className="sidebar-brand">
-            <div className="brand-copy">
-              <h1>Ollama Chat</h1>
+            <div className="brand-identity">
+              <div className="brand-mark"><HiveMindLogo /></div>
+              <div className="brand-copy">
+                <h1>HiveMind</h1>
+                <p className="brand-tagline">Private intelligence</p>
+              </div>
             </div>
 
             <div className="sidebar-brand-actions">
               <Button kind="primary" renderIcon={Add} size="sm" onClick={handleNewConversation}>
                 New chat
               </Button>
-              <Button kind="tertiary" renderIcon={Renew} size="sm" onClick={refreshModels}>
-                Refresh
-              </Button>
+              <Button kind="ghost" renderIcon={Renew} size="sm" hasIconOnly iconDescription="Refresh models" onClick={refreshModels} />
             </div>
           </div>
 
@@ -630,61 +1003,53 @@ export default function App() {
               <p>No conversations yet.</p>
             </div>
           ) : (
-            (() => {
-              const groups = groupConversationsByDate(filteredConversations);
-              return Object.entries(groups).map(([label, convs]) => {
+            <>
+              {assistantConvs.length > 0 && (
+                <div className="conv-section">
+                  <div className="conv-section-header">
+                    <Bot size={11} />
+                    <span>Assistant Chats</span>
+                    <span className="conv-section-count">{assistantConvs.length}</span>
+                  </div>
+                  {assistantConvs.map((conv) => (
+                    <ConversationCard
+                      key={conv.id}
+                      conversation={conv}
+                      isActive={conv.id === activeConversationId}
+                      {...renamingProps}
+                    />
+                  ))}
+                </div>
+              )}
+              {Object.entries(regularGroups).map(([label, convs]) => {
                 if (convs.length === 0) return null;
                 return (
                   <div key={label} className="conv-group">
                     <p className="conv-group-label">{label}</p>
-                    {convs.map((conversation) => {
-                      const isActive = conversation.id === activeConversationId;
-                      return (
-                        <div
-                          key={conversation.id}
-                          className={`conversation-card ${isActive ? 'conversation-card-active' : ''}`}
-                          role="button"
-                          tabIndex={0}
-                          onClick={() => handleSelectConversation(conversation.id)}
-                          onKeyDown={(event) => {
-                            if (event.key === 'Enter' || event.key === ' ') {
-                              event.preventDefault();
-                              handleSelectConversation(conversation.id);
-                            }
-                          }}
-                        >
-                          <div className="conversation-card-main">
-                            <div className="conversation-card-title">{conversationTitle(conversation)}</div>
-                            <div className="conversation-card-meta">
-                              <span>{conversation.message_count ?? 0} messages</span>
-                              <span>{formatTime(conversation.updated_at)}</span>
-                            </div>
-                          </div>
-                          <Button
-                            kind="ghost"
-                            size="sm"
-                            hasIconOnly
-                            renderIcon={TrashCan}
-                            iconDescription={`Delete ${conversationTitle(conversation)}`}
-                            onClick={(event) => handleDeleteConversation(event, conversation.id)}
-                          />
-                        </div>
-                      );
-                    })}
+                    {convs.map((conv) => (
+                      <ConversationCard
+                        key={conv.id}
+                        conversation={conv}
+                        isActive={conv.id === activeConversationId}
+                        {...renamingProps}
+                      />
+                    ))}
                   </div>
                 );
-              });
-            })()
+              })}
+            </>
           )}
         </div>
 
         <div className="sidebar-footer">
           <div className="sidebar-status-card">
-            <div className="sidebar-status-line">
-              <span className={`status-dot status-${status}`} />
-              <span>{status === 'ok' ? 'System ready' : status === 'warn' ? 'Limited mode' : 'Attention needed'}</span>
+            <span className={`status-dot status-${status}`} />
+            <div className="status-info">
+              <div className="sidebar-status-line">
+                {status === 'ok' ? 'System ready' : status === 'warn' ? 'Limited mode' : 'Attention needed'}
+              </div>
+              <p>{statusDetail}</p>
             </div>
-            <p>{statusDetail}</p>
           </div>
           <Button kind="ghost" size="sm" className="sidebar-settings-btn" renderIcon={Settings} onClick={() => setSettingsOpen(true)}>
             Settings
@@ -712,20 +1077,8 @@ export default function App() {
               onClick={() => setSidebarOpen((current) => !current)}
             />
             <div className="header-title-group">
-              <p className="eyebrow">
-                {view === 'assistants'
-                  ? 'RAG — Codespace Assistants'
-                  : activeAssistantName
-                    ? `Chatting with ${activeAssistantName}`
-                    : 'Local inference'}
-              </p>
-              <h2>
-                {view === 'assistants'
-                  ? 'Assistants'
-                  : activeConversation
-                    ? conversationTitle(activeConversation)
-                    : 'New chat'}
-              </h2>
+              <p className="eyebrow">{headerEyebrow}</p>
+              <h2>{headerTitle}</h2>
               {view === 'chat' && (
                 <p className="conversation-subtitle">
                   {activeAssistantName && (
@@ -747,15 +1100,12 @@ export default function App() {
             >
               {theme === 'dark' ? <Light size={18} /> : <Moon size={18} />}
             </button>
-            <Tag type={statusTagType(status)}>
-              {status === 'ok' ? 'Ready' : status === 'warn' ? 'Limited' : 'Offline'}
-            </Tag>
             <Select
               id="model-select"
               labelText="Model"
               hideLabel
               value={selectedModel}
-              onChange={(event) => setSelectedModel(event.target.value)}
+              onChange={handleModelChange}
               size="sm"
             >
               {models.length === 0 && <SelectItem text="Loading models..." value="" />}
@@ -766,14 +1116,18 @@ export default function App() {
           </div>
         </header>
 
-        {view === 'assistants' ? (
+        <div className={`workspace-body${quickChatAssistant ? ' has-quick-chat' : ''}`}>
+        {view === 'assistants' && (
           <div className="workspace-content">
-            <AssistantsPage onOpenChat={handleOpenAssistantChat} />
+            <AssistantsPage
+              onOpenChat={handleOpenAssistantChat}
+              onQuickChat={(assistant) => setQuickChatAssistant(assistant)}
+            />
           </div>
-        ) : null}
+        )}
 
         {view === 'chat' && (
-          <div className="workspace-content">
+          <div className="workspace-content workspace-chat">
             <section className="chat-panel">
               {errorMessage && (
                 <div className="error-banner" role="alert">
@@ -806,16 +1160,43 @@ export default function App() {
               </div>
 
               <div className="composer-panel">
+                <div className="composer-inner">
+                {attachedImages.length > 0 && (
+                  <div className="image-preview-strip">
+                    {attachedImages.map((img) => (
+                      <div key={img.id} className="image-preview-item">
+                        <img src={img.dataUrl} alt="attachment" />
+                        <button
+                          className="image-preview-remove"
+                          onClick={() => handleRemoveImage(img.id)}
+                          aria-label="Remove image"
+                        >
+                          <Close size={10} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
                 <textarea
                   ref={composerRef}
                   id="composer"
                   className="composer-textarea"
-                  placeholder="Ask something, paste code, or describe the task..."
+                  placeholder="Ask a question, paste code, or describe what you need…"
                   value={composerValue}
                   onChange={(event) => setComposerValue(event.target.value)}
                   onKeyDown={handleComposerKeyDown}
                   onInput={handleComposerInput}
                   rows={1}
+                />
+
+                <input
+                  ref={imageInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  style={{ display: 'none' }}
+                  onChange={handleImageAttach}
                 />
 
                 <div className="composer-actions">
@@ -835,14 +1216,39 @@ export default function App() {
                       <span className="composer-char-count">{composerValue.length}</span>
                     )}
                   </div>
-                  <Button kind="primary" renderIcon={Send} disabled={!composerValue.trim() || sending} onClick={handleSend}>
-                    {sending ? 'Sending' : 'Send'}
-                  </Button>
+                  <div className="composer-right-actions">
+                    <span title={attachTooltip}>
+                      <Button
+                        kind="ghost"
+                        size="sm"
+                        hasIconOnly
+                        renderIcon={Attachment}
+                        iconDescription="Attach image"
+                        disabled={!canAttachImage}
+                        onClick={() => imageInputRef.current?.click()}
+                      />
+                    </span>
+                    <Button kind="primary" renderIcon={Send} disabled={!composerValue.trim() || sending} onClick={handleSend}>
+                      {sending ? 'Sending' : 'Send'}
+                    </Button>
+                  </div>
                 </div>
+                </div>{/* composer-inner */}
               </div>
             </section>
           </div>
         )}
+
+        {quickChatAssistant && (
+          <QuickChatDrawer
+            assistant={quickChatAssistant}
+            selectedModel={selectedModel}
+            settings={settings}
+            onClose={() => setQuickChatAssistant(null)}
+            onOpenFull={(assistant) => { setQuickChatAssistant(null); handleOpenAssistantChat(assistant); }}
+          />
+        )}
+        </div>{/* workspace-body */}
       </main>
 
       {settingsOpen && (
@@ -867,7 +1273,7 @@ export default function App() {
                   max="1"
                   step="0.1"
                   value={settings.temperature}
-                  onChange={(event) => persistSettings({ ...settings, temperature: Number(event.target.value) })}
+                  onChange={(event) => setSettings((s) => ({ ...s, temperature: Number(event.target.value) }))}
                 />
               </label>
 
@@ -879,7 +1285,7 @@ export default function App() {
                   max="1"
                   step="0.05"
                   value={settings.topP}
-                  onChange={(event) => persistSettings({ ...settings, topP: Number(event.target.value) })}
+                  onChange={(event) => setSettings((s) => ({ ...s, topP: Number(event.target.value) }))}
                 />
               </label>
 
@@ -890,7 +1296,7 @@ export default function App() {
                   min="1"
                   max="8192"
                   value={settings.maxTokens}
-                  onChange={(event) => persistSettings({ ...settings, maxTokens: Number(event.target.value) || 1 })}
+                  onChange={(event) => setSettings((s) => ({ ...s, maxTokens: Number(event.target.value) || 1 }))}
                 />
               </label>
             </div>
@@ -899,7 +1305,7 @@ export default function App() {
               <Button kind="secondary" onClick={() => persistSettings(DEFAULT_SETTINGS)}>
                 Reset
               </Button>
-              <Button kind="primary" onClick={handleSettingsSave}>
+              <Button kind="primary" onClick={() => { persistSettings(settings); setSettingsOpen(false); }}>
                 Save
               </Button>
             </div>

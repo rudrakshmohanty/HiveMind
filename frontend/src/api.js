@@ -1,5 +1,5 @@
 /**
- * API client for the Ollama Chat backend.
+ * API client for the HiveMind backend.
  */
 
 export async function fetchModels(baseURL) {
@@ -34,12 +34,21 @@ export async function createConversation(baseURL, data = {}) {
   if (data.temperature !== undefined) params.set('temperature', String(data.temperature));
   if (data.top_p !== undefined) params.set('top_p', String(data.top_p));
   if (data.max_tokens !== undefined) params.set('max_tokens', String(data.max_tokens));
+  if (data.assistant_id) params.set('assistant_id', data.assistant_id);
+  if (data.assistant_name) params.set('assistant_name', data.assistant_name);
 
   const query = params.toString();
   const resp = await fetch(`${baseURL}/conversations${query ? `?${query}` : ''}`, {
     method: 'POST',
   });
   if (!resp.ok) throw new Error('Failed to create conversation');
+  return resp.json();
+}
+
+export async function renameConversation(baseURL, id, title) {
+  const params = new URLSearchParams({ title });
+  const resp = await fetch(`${baseURL}/conversations/${id}?${params}`, { method: 'PATCH' });
+  if (!resp.ok) throw new Error('Failed to rename conversation');
   return resp.json();
 }
 
@@ -94,6 +103,19 @@ export async function createAssistant(baseURL, data) {
   if (!resp.ok) {
     const text = await resp.text();
     throw new Error(`Failed to create assistant: ${text}`);
+  }
+  return resp.json();
+}
+
+export async function updateAssistant(baseURL, id, data) {
+  const resp = await fetch(`${baseURL}/assistants/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Failed to update assistant: ${text}`);
   }
   return resp.json();
 }

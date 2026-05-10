@@ -238,7 +238,10 @@ async def send_chat_stream_post(req: schemas.ChatRequest):
         except Exception:
             pass
 
-    messages_for_ollama.extend(messages_history + [{"role": "user", "content": req.message}])
+    user_msg: dict = {"role": "user", "content": req.message}
+    if req.images:
+        user_msg["images"] = req.images
+    messages_for_ollama.extend(messages_history + [user_msg])
 
     request_data = {
         "model": model,
