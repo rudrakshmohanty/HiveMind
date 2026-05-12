@@ -7,9 +7,10 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [react()],
+    publicDir: '../assets',
     server: {
       host: '0.0.0.0',
-      port: 3000,
+      port: 5173,
       proxy: {
         '/api': backendTarget,
         '/ws': backendTarget.replace('http', 'ws'),

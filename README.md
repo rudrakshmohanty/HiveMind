@@ -1,5 +1,9 @@
 # HiveMind
 
+<p align="center">
+  <img src="assets/logo2.png" alt="HiveMind" />
+</p>
+
 **Your own private AI, running entirely on your computer.**
 
 HiveMind is a chat app powered by AI — like ChatGPT, but everything stays on your machine. No subscriptions, no cloud, no data sent anywhere. You own it completely.
@@ -41,7 +45,7 @@ Here are some real examples of what people use HiveMind for:
 
 ---
 
-## How it works (plain English)
+## How it works ?
 
 HiveMind has two main parts:
 
@@ -191,12 +195,12 @@ A tool for defining and running multi-container applications. The `docker-compos
 
 You don't need to be a developer to use HiveMind, but you do need to install a few tools. Here's what each one does:
 
-| Tool | What it does | Install link |
-| --- | --- | --- |
-| **Ollama** | Runs the AI model on your computer | [ollama.com](https://ollama.com) |
-| **MongoDB** | Saves your chat history (like a local database) | [mongodb.com](https://www.mongodb.com/try/download/community) |
-| **Python 3.11+** | Runs the backend (the behind-the-scenes engine) | [python.org](https://www.python.org/downloads/) |
-| **Node.js 18+** | Runs the frontend (the visual interface in your browser) | [nodejs.org](https://nodejs.org) |
+| Tool                   | What it does                                             | Install link                                               |
+| ---------------------- | -------------------------------------------------------- | ---------------------------------------------------------- |
+| **Ollama**       | Runs the AI model on your computer                       | [ollama.com](https://ollama.com)                              |
+| **MongoDB**      | Saves your chat history (like a local database)          | [mongodb.com](https://www.mongodb.com/try/download/community) |
+| **Python 3.11+** | Runs the backend (the behind-the-scenes engine)          | [python.org](https://www.python.org/downloads/)               |
+| **Node.js 18+**  | Runs the frontend (the visual interface in your browser) | [nodejs.org](https://nodejs.org)                              |
 
 > **Not a developer?** Think of Ollama as the "engine" that runs AI models, MongoDB as a filing cabinet for your chats, Python as what powers the server behind the scenes, and Node.js as what builds the website you look at.
 
@@ -300,7 +304,7 @@ Make sure you've downloaded `nomic-embed-text` (Step 3). Without it, indexing wo
 4. Enter the **full path** to the folder you want it to learn
 
    > A full path looks like `/Users/yourname/Documents/myproject` on Mac/Linux, or `C:\Users\yourname\Documents\myproject` on Windows.
-
+   >
 5. Click **Save**, then click **Index** on the assistant card
 6. Wait for indexing to finish. A small project takes under a minute; a large codebase might take 5–10 minutes. You'll see the status update automatically.
 7. Once it says **Ready**, click **Open chat**
@@ -329,11 +333,11 @@ If you know what Docker is, you can run the entire HiveMind stack with one comma
 docker compose up --build
 ```
 
-| Service | Address |
-| --- | --- |
-| HiveMind (frontend) | `http://localhost:3000` |
-| Backend API | `http://localhost:8000` |
-| Ollama | `http://localhost:11434` |
+| Service             | Address                    |
+| ------------------- | -------------------------- |
+| HiveMind (frontend) | `http://localhost:3000`  |
+| Backend API         | `http://localhost:8000`  |
+| Ollama              | `http://localhost:11434` |
 
 > **After starting Docker**, you still need to pull the models manually inside the Ollama container:
 >
@@ -348,13 +352,13 @@ docker compose up --build
 
 When you first open HiveMind, you'll pick which AI model to chat with. Think of models like hiring different people for the same job — they have different strengths and require different amounts of resources.
 
-| Model | Size | Best for | RAM needed |
-| --- | --- | --- | --- |
-| `phi3` | 3.8B | Low-end machines, quick answers | ~4 GB |
-| `mistral` | 7B | Balanced, general purpose | ~8 GB |
-| `llama3` | 8B | Strong reasoning, nuanced answers | ~8 GB |
-| `codellama` | 7B | Code-heavy questions | ~8 GB |
-| `gemma2` | 9B | High quality, well-rounded | ~10 GB |
+| Model         | Size | Best for                          | RAM needed |
+| ------------- | ---- | --------------------------------- | ---------- |
+| `phi3`      | 3.8B | Low-end machines, quick answers   | ~4 GB      |
+| `mistral`   | 7B   | Balanced, general purpose         | ~8 GB      |
+| `llama3`    | 8B   | Strong reasoning, nuanced answers | ~8 GB      |
+| `codellama` | 7B   | Code-heavy questions              | ~8 GB      |
+| `gemma2`    | 9B   | High quality, well-rounded        | ~10 GB     |
 
 > **Not sure which to pick?** Start with `mistral`. It's fast and handles most tasks well. You can always switch.
 >
@@ -374,13 +378,13 @@ EMBED_MODEL=nomic-embed-text
 CHROMA_PATH=./chroma_db
 ```
 
-| Setting | Default | What it controls |
-| --- | --- | --- |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Where HiveMind looks for Ollama |
-| `MONGODB_URL` | `mongodb://localhost:27017` | Where your chat history is stored |
-| `MONGODB_DB` | `hivemind` | The name of the database |
-| `EMBED_MODEL` | `nomic-embed-text` | Which model converts text to embeddings |
-| `CHROMA_PATH` | `./chroma_db` | Where the assistant knowledge is stored on disk |
+| Setting             | Default                       | What it controls                                |
+| ------------------- | ----------------------------- | ----------------------------------------------- |
+| `OLLAMA_BASE_URL` | `http://localhost:11434`    | Where HiveMind looks for Ollama                 |
+| `MONGODB_URL`     | `mongodb://localhost:27017` | Where your chat history is stored               |
+| `MONGODB_DB`      | `hivemind`                  | The name of the database                        |
+| `EMBED_MODEL`     | `nomic-embed-text`          | Which model converts text to embeddings         |
+| `CHROMA_PATH`     | `./chroma_db`               | Where the assistant knowledge is stored on disk |
 
 > Most users never need to touch this file. Only change it if you know what you're doing or if the defaults conflict with something else on your system.
 
