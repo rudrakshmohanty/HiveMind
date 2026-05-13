@@ -69,7 +69,8 @@ Most AI chat tools (ChatGPT, Claude, Gemini) live in the cloud — every message
 ### 🤖 Model management
 
 - Pull and switch between any model available in Ollama
-- Models are grouped by category in the picker:| Category                           | Examples                    | Use for                        |
+- Models are grouped by category in the picker:
+- | Category                           | Examples                    | Use for                        |
   | ---------------------------------- | --------------------------- | ------------------------------ |
   | **High** — thinking / heavy | DeepSeek-R, QwQ, large 70B+ | Complex reasoning, code review |
   | **Low** — fast / everyday   | Mistral, Phi-3, Gemma       | Quick questions, general chat  |
