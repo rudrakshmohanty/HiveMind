@@ -2,27 +2,72 @@
  * API client for the HiveMind backend.
  */
 
+const STATUS_HINTS = {
+  400: 'Invalid request — check your input',
+  401: 'Unauthorized',
+  404: 'Not found',
+  422: 'Invalid data — check your input',
+  500: 'Server error — check backend logs',
+  502: 'Ollama is unreachable — run `ollama serve` in a terminal',
+  503: 'Service unavailable — try again in a moment',
+  504: 'Gateway timeout — Ollama took too long to respond',
+};
+
+async function extractError(resp, fallback) {
+  try {
+    const body = await resp.clone().json();
+    const msg = body.detail || body.message || body.error;
+    if (msg) return typeof msg === 'string' ? msg : JSON.stringify(msg);
+  } catch {}
+  try {
+    const text = await resp.clone().text();
+    if (text && text.length < 300 && !text.startsWith('<')) return text;
+  } catch {}
+  return STATUS_HINTS[resp.status] || fallback || `HTTP ${resp.status}`;
+}
+
 export async function fetchModels(baseURL) {
-  const resp = await fetch(`${baseURL}/models`);
-  if (!resp.ok) throw new Error('Failed to fetch models');
+  let resp;
+  try {
+    resp = await fetch(`${baseURL}/models`);
+  } catch {
+    throw new Error('Cannot reach backend — is the server running?');
+  }
+  if (!resp.ok) throw new Error(await extractError(resp, 'Failed to fetch models'));
   return resp.json();
 }
 
 export async function fetchStatus(baseURL) {
-  const resp = await fetch(`${baseURL}/status`);
-  if (!resp.ok) throw new Error('Failed to fetch status');
+  let resp;
+  try {
+    resp = await fetch(`${baseURL}/status`);
+  } catch {
+    throw new Error('Cannot reach backend — is the server running?');
+  }
+  if (!resp.ok) throw new Error(await extractError(resp, 'Failed to fetch status'));
   return resp.json();
 }
 
 export async function fetchConversations(baseURL) {
-  const resp = await fetch(`${baseURL}/conversations`);
-  if (!resp.ok) throw new Error('Failed to fetch conversations');
+  let resp;
+  try {
+    resp = await fetch(`${baseURL}/conversations`);
+  } catch {
+    throw new Error('Cannot reach backend — is the server running?');
+  }
+  if (!resp.ok) throw new Error(await extractError(resp, 'Failed to load conversations'));
   return resp.json();
 }
 
 export async function fetchConversation(baseURL, id) {
-  const resp = await fetch(`${baseURL}/conversations/${id}`);
-  if (!resp.ok) throw new Error('Failed to fetch conversation');
+  let resp;
+  try {
+    resp = await fetch(`${baseURL}/conversations/${id}`);
+  } catch {
+    throw new Error('Cannot reach backend — is the server running?');
+  }
+  if (resp.status === 404) throw new Error('Conversation not found — it may have been deleted');
+  if (!resp.ok) throw new Error(await extractError(resp, 'Failed to load conversation'));
   return resp.json();
 }
 
@@ -38,49 +83,72 @@ export async function createConversation(baseURL, data = {}) {
   if (data.assistant_name) params.set('assistant_name', data.assistant_name);
 
   const query = params.toString();
-  const resp = await fetch(`${baseURL}/conversations${query ? `?${query}` : ''}`, {
-    method: 'POST',
-  });
-  if (!resp.ok) throw new Error('Failed to create conversation');
+  let resp;
+  try {
+    resp = await fetch(`${baseURL}/conversations${query ? `?${query}` : ''}`, { method: 'POST' });
+  } catch {
+    throw new Error('Cannot reach backend — is the server running?');
+  }
+  if (!resp.ok) throw new Error(await extractError(resp, 'Failed to create conversation'));
   return resp.json();
 }
 
 export async function renameConversation(baseURL, id, title) {
   const params = new URLSearchParams({ title });
-  const resp = await fetch(`${baseURL}/conversations/${id}?${params}`, { method: 'PATCH' });
-  if (!resp.ok) throw new Error('Failed to rename conversation');
+  let resp;
+  try {
+    resp = await fetch(`${baseURL}/conversations/${id}?${params}`, { method: 'PATCH' });
+  } catch {
+    throw new Error('Cannot reach backend — is the server running?');
+  }
+  if (!resp.ok) throw new Error(await extractError(resp, 'Failed to rename conversation'));
   return resp.json();
 }
 
 export async function deleteConversation(baseURL, id) {
-  const resp = await fetch(`${baseURL}/conversations/${id}`, { method: 'DELETE' });
-  if (!resp.ok) throw new Error('Failed to delete conversation');
+  let resp;
+  try {
+    resp = await fetch(`${baseURL}/conversations/${id}`, { method: 'DELETE' });
+  } catch {
+    throw new Error('Cannot reach backend — is the server running?');
+  }
+  if (resp.status === 404) throw new Error('Conversation already deleted or not found');
+  if (!resp.ok) throw new Error(await extractError(resp, 'Failed to delete conversation'));
   return resp.json();
 }
 
 export async function sendMessage(baseURL, data) {
-  const resp = await fetch(`${baseURL}/chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  });
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`Chat error (${resp.status}): ${text}`);
+  let resp;
+  try {
+    resp = await fetch(`${baseURL}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+  } catch {
+    throw new Error('Cannot reach backend — is the server running?');
   }
+  if (!resp.ok) throw new Error(await extractError(resp, 'Chat request failed'));
   return resp.json();
 }
 
 export async function sendMessageStream(baseURL, data) {
-  const resp = await fetch(`${baseURL}/chat/stream`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  });
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`Chat error (${resp.status}): ${text}`);
+  let resp;
+  try {
+    resp = await fetch(`${baseURL}/chat/stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+  } catch {
+    throw new Error('Cannot reach backend — is the server running?');
   }
+  if (resp.status === 502) throw new Error('Ollama is unreachable — run `ollama serve` in a terminal');
+  if (resp.status === 404) {
+    const msg = await extractError(resp, 'Model or conversation not found');
+    throw new Error(msg);
+  }
+  if (!resp.ok) throw new Error(await extractError(resp, 'Streaming chat failed'));
   return resp.body;
 }
 
@@ -89,52 +157,106 @@ export async function sendMessageStream(baseURL, data) {
 // ---------------------------------------------------------------------------
 
 export async function fetchAssistants(baseURL) {
-  const resp = await fetch(`${baseURL}/assistants`);
-  if (!resp.ok) throw new Error('Failed to fetch assistants');
+  let resp;
+  try {
+    resp = await fetch(`${baseURL}/assistants`);
+  } catch {
+    throw new Error('Cannot reach backend — is the server running?');
+  }
+  if (!resp.ok) throw new Error(await extractError(resp, 'Failed to fetch assistants'));
   return resp.json();
 }
 
 export async function createAssistant(baseURL, data) {
-  const resp = await fetch(`${baseURL}/assistants`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  });
+  let resp;
+  try {
+    resp = await fetch(`${baseURL}/assistants`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+  } catch {
+    throw new Error('Cannot reach backend — is the server running?');
+  }
   if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`Failed to create assistant: ${text}`);
+    const msg = await extractError(resp, 'Failed to create assistant');
+    throw new Error(msg);
   }
   return resp.json();
 }
 
 export async function updateAssistant(baseURL, id, data) {
-  const resp = await fetch(`${baseURL}/assistants/${id}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  });
+  let resp;
+  try {
+    resp = await fetch(`${baseURL}/assistants/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+  } catch {
+    throw new Error('Cannot reach backend — is the server running?');
+  }
   if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`Failed to update assistant: ${text}`);
+    const msg = await extractError(resp, 'Failed to update assistant');
+    throw new Error(msg);
   }
   return resp.json();
 }
 
 export async function deleteAssistant(baseURL, id) {
-  const resp = await fetch(`${baseURL}/assistants/${id}`, { method: 'DELETE' });
-  if (!resp.ok) throw new Error('Failed to delete assistant');
+  let resp;
+  try {
+    resp = await fetch(`${baseURL}/assistants/${id}`, { method: 'DELETE' });
+  } catch {
+    throw new Error('Cannot reach backend — is the server running?');
+  }
+  if (!resp.ok) throw new Error(await extractError(resp, 'Failed to delete assistant'));
+  return resp.json();
+}
+
+export async function addPathToAssistant(baseURL, id, path) {
+  const params = new URLSearchParams({ path });
+  let resp;
+  try {
+    resp = await fetch(`${baseURL}/assistants/${id}/add-path?${params}`, { method: 'POST' });
+  } catch {
+    throw new Error('Cannot reach backend — is the server running?');
+  }
+  if (!resp.ok) throw new Error(await extractError(resp, 'Failed to add path'));
+  return resp.json();
+}
+
+export async function removePathFromAssistant(baseURL, id, path) {
+  const params = new URLSearchParams({ path });
+  let resp;
+  try {
+    resp = await fetch(`${baseURL}/assistants/${id}/add-path?${params}`, { method: 'DELETE' });
+  } catch {
+    throw new Error('Cannot reach backend — is the server running?');
+  }
+  if (!resp.ok) throw new Error(await extractError(resp, 'Failed to remove path'));
   return resp.json();
 }
 
 export async function triggerIndex(baseURL, id, force = false) {
   const url = `${baseURL}/assistants/${id}/index${force ? '?force=true' : ''}`;
-  const resp = await fetch(url, { method: 'POST' });
-  if (!resp.ok) throw new Error('Failed to start indexing');
+  let resp;
+  try {
+    resp = await fetch(url, { method: 'POST' });
+  } catch {
+    throw new Error('Cannot reach backend — is the server running?');
+  }
+  if (!resp.ok) throw new Error(await extractError(resp, 'Failed to start indexing'));
   return resp.json();
 }
 
 export async function fetchIndexStatus(baseURL, id) {
-  const resp = await fetch(`${baseURL}/assistants/${id}/index/status`);
-  if (!resp.ok) throw new Error('Failed to fetch index status');
+  let resp;
+  try {
+    resp = await fetch(`${baseURL}/assistants/${id}/index/status`);
+  } catch {
+    throw new Error('Cannot reach backend — is the server running?');
+  }
+  if (!resp.ok) throw new Error(await extractError(resp, 'Failed to fetch index status'));
   return resp.json();
 }

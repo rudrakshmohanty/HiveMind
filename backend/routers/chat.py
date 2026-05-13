@@ -3,6 +3,7 @@ from fastapi.responses import StreamingResponse
 import asyncio
 import time
 import json
+import httpx
 
 try:
     from .. import schemas, database
@@ -157,18 +158,28 @@ async def send_chat_stream(request: Request):
 
     async def generate():
         content_buffer = []
-        async for chunk in ollama_service.stream_chat(request_data):
-            try:
-                chunk_json = json.loads(chunk)
-                delta = chunk_json.get("message", {}).get("content", "")
-                content_buffer.append(delta)
-                yield f"data: {json.dumps({'content': delta})}\n\n"
-            except json.JSONDecodeError:
-                continue
-        # Save assistant response
-        full_response = "".join(content_buffer)
-        if full_response:
-            conversation_service.add_message(db, conv_id, "assistant", full_response, model)
+        try:
+            async for chunk in ollama_service.stream_chat(request_data):
+                try:
+                    chunk_json = json.loads(chunk)
+                    delta = chunk_json.get("message", {}).get("content", "")
+                    content_buffer.append(delta)
+                    yield f"data: {json.dumps({'content': delta})}\n\n"
+                except json.JSONDecodeError:
+                    continue
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                yield f"data: {json.dumps({'error': f'Model not found: {model} — run `ollama pull {model}`'})}\n\n"
+            else:
+                yield f"data: {json.dumps({'error': f'Ollama error ({e.response.status_code}): {e.response.text[:200]}'})}\n\n"
+        except httpx.ConnectError:
+            yield f"data: {json.dumps({'error': 'Cannot connect to Ollama — run `ollama serve` in a terminal'})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+        finally:
+            full_response = "".join(content_buffer)
+            if full_response:
+                conversation_service.add_message(db, conv_id, "assistant", full_response, model)
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -252,16 +263,27 @@ async def send_chat_stream_post(req: schemas.ChatRequest):
 
     async def generate():
         content_buffer = []
-        async for chunk in ollama_service.stream_chat(request_data):
-            try:
-                chunk_json = json.loads(chunk)
-                delta = chunk_json.get("message", {}).get("content", "")
-                content_buffer.append(delta)
-                yield f"data: {json.dumps({'content': delta})}\n\n"
-            except json.JSONDecodeError:
-                continue
-        full_response = "".join(content_buffer)
-        if full_response:
-            conversation_service.add_message(db, conv_id, "assistant", full_response, model)
+        try:
+            async for chunk in ollama_service.stream_chat(request_data):
+                try:
+                    chunk_json = json.loads(chunk)
+                    delta = chunk_json.get("message", {}).get("content", "")
+                    content_buffer.append(delta)
+                    yield f"data: {json.dumps({'content': delta})}\n\n"
+                except json.JSONDecodeError:
+                    continue
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                yield f"data: {json.dumps({'error': f'Model not found: {model} — run `ollama pull {model}`'})}\n\n"
+            else:
+                yield f"data: {json.dumps({'error': f'Ollama error ({e.response.status_code}): {e.response.text[:200]}'})}\n\n"
+        except httpx.ConnectError:
+            yield f"data: {json.dumps({'error': 'Cannot connect to Ollama — run `ollama serve` in a terminal'})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+        finally:
+            full_response = "".join(content_buffer)
+            if full_response:
+                conversation_service.add_message(db, conv_id, "assistant", full_response, model)
 
     return StreamingResponse(generate(), media_type="text/event-stream")
