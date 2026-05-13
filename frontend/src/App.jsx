@@ -1,4 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import hljs from 'highlight.js/lib/common';
 import {
   createConversation,
   deleteConversation,
@@ -206,64 +209,25 @@ function readFileAsDataUrl(file) {
   });
 }
 
-// ─── Per-word token stream (fade-in each word as it arrives) ─────────────────
-
-function useTokenStream(text, speed = 38, active = true) {
-  const tokens = useMemo(() => {
-    if (!text) return [];
-    return text.match(/```[\s\S]*?```|`[^`]+`|\*\*[^*]+\*\*|\s+|[^\s`*]+/g) || [];
-  }, [text]);
-  const [n, setN] = useState(0);
-  const [done, setDone] = useState(false);
-  useEffect(() => {
-    if (!active) { setN(tokens.length); setDone(true); return; }
-    setN(0); setDone(false);
-    let i = 0;
-    const id = setInterval(() => {
-      i++;
-      if (i >= tokens.length) { setN(tokens.length); setDone(true); clearInterval(id); }
-      else setN(i);
-    }, speed);
-    return () => clearInterval(id);
-  }, [tokens, speed, active]);
-  return { tokens, n, done };
-}
-
-function StreamedContent({ tokens, n }) {
-  const visible = tokens.slice(0, n).join('');
-  const segs = renderMd(visible);
-
-  const wrapText = (node, keyBase) => {
-    if (typeof node === 'string') {
-      return node.split(/(\s+)/).map((p, i) => {
-        if (/^\s+$/.test(p)) return p;
-        if (p === '') return null;
-        return <span key={`${keyBase}-${i}`} className="tok">{p}</span>;
-      });
-    }
-    if (Array.isArray(node)) return node.map((c, i) => wrapText(c, `${keyBase}-${i}`));
-    if (node && node.props) {
-      if (node.type === 'pre' || (node.props.className && node.props.className.includes('md-code-block'))) {
-        return { ...node, props: { ...node.props, className: (node.props.className || '') + ' tok-block' } };
-      }
-      const wrapped = wrapText(node.props.children, `${keyBase}c`);
-      return { ...node, props: { ...node.props, children: wrapped } };
-    }
-    return node;
-  };
-
-  return <>{segs.map((s, i) => wrapText(s, `s${i}`))}</>;
-}
-
-// ─── Enhanced Markdown renderer ──────────────────────────────────────────────
+// ─── Code block with syntax highlighting ─────────────────────────────────────
 
 function CodeBlock({ lang, code }) {
   const [copied, setCopied] = useState(false);
+
+  const highlighted = useMemo(() => {
+    const trimmed = code.trimEnd();
+    if (lang && hljs.getLanguage(lang)) {
+      return hljs.highlight(trimmed, { language: lang, ignoreIllegals: true }).value;
+    }
+    return hljs.highlightAuto(trimmed).value;
+  }, [lang, code]);
+
   const copy = () => {
-    navigator.clipboard.writeText(code).catch(() => {});
+    navigator.clipboard.writeText(code.trimEnd()).catch(() => {});
     setCopied(true);
     setTimeout(() => setCopied(false), 1600);
   };
+
   return (
     <div className="md-code-block">
       <div className="md-code-head">
@@ -273,248 +237,66 @@ function CodeBlock({ lang, code }) {
           {copied ? 'Copied!' : 'Copy'}
         </button>
       </div>
-      <pre><code>{code.trimEnd()}</code></pre>
+      <pre><code
+        className={`hljs${lang ? ` language-${lang}` : ''}`}
+        dangerouslySetInnerHTML={{ __html: highlighted }}
+      /></pre>
     </div>
   );
 }
 
-// Inline: bold, italic, code, strikethrough, links
-function renderInline(text) {
-  if (!text) return [];
-  const re = /(`[^`\n]+`)|(\*\*([^*\n]+)\*\*)|(\*([^*\n]+)\*)|(_([^_\n]+)_)|(~~([^~\n]+)~~)|(\[([^\]]+)\]\(([^)]+)\))/g;
-  const nodes = [];
-  let last = 0, m, k = 0;
-  while ((m = re.exec(text)) !== null) {
-    if (m.index > last) nodes.push(text.slice(last, m.index));
-    if (m[1])  nodes.push(<code key={k++} className="md-ic">{m[1].slice(1, -1)}</code>);
-    else if (m[2])  nodes.push(<strong key={k++}>{m[3]}</strong>);
-    else if (m[4])  nodes.push(<em key={k++}>{m[5]}</em>);
-    else if (m[6])  nodes.push(<em key={k++}>{m[7]}</em>);
-    else if (m[8])  nodes.push(<s key={k++}>{m[9]}</s>);
-    else if (m[10]) nodes.push(<a key={k++} href={m[12]} target="_blank" rel="noopener noreferrer">{m[11]}</a>);
-    last = m.index + m[0].length;
-  }
-  if (last < text.length) nodes.push(text.slice(last));
-  return nodes;
-}
+// ─── react-markdown component map ─────────────────────────────────────────────
 
-// ─── List parser ─────────────────────────────────────────────────────────────
-// Parses lines into a flat array of {kind, content, checked, children, indent}.
-// Indented lines become children; same-indent ul items after an ol item are
-// also folded in as children (handles LLM output that omits indent).
-
-function parseListBlock(lines) {
-  const items = [];
-  let i = 0;
-  while (i < lines.length) {
-    const raw = lines[i];
-    const trimmed = raw.trim();
-    if (!trimmed) { i++; continue; }
-    const indent = raw.length - raw.trimStart().length;
-    const olM   = trimmed.match(/^(\d+)[.)]\s+(.*)$/);
-    const taskM = trimmed.match(/^[-*+]\s+\[([ xX])\]\s+(.*)$/);
-    const ulM   = !taskM && trimmed.match(/^[-*+]\s+(.*)$/);
-
-    if (olM || taskM || ulM) {
-      const content = olM ? olM[2] : taskM ? taskM[2] : ulM[1];
-      const kind    = olM ? 'ol' : 'ul';
-      const checked = taskM ? taskM[1].toLowerCase() === 'x' : undefined;
-
-      // Collect explicitly indented child lines
-      const childLines = [];
-      i++;
-      while (i < lines.length) {
-        const next = lines[i];
-        if (!next.trim()) { i++; continue; }
-        const ni = next.length - next.trimStart().length;
-        if (ni > indent) {
-          childLines.push(next.slice(Math.min(ni, indent + 2)));
-          i++;
-        } else break;
-      }
-      const children = childLines.length > 0 ? parseListBlock(childLines) : null;
-      items.push({ kind, content, checked, children, indent });
-    } else {
-      // Non-list line: append to previous item as continuation
-      if (items.length > 0) {
-        items[items.length - 1].content += ' ' + trimmed;
-      } else {
-        items.push({ kind: 'text', content: trimmed, indent: 0 });
-      }
-      i++;
+const MD_COMPONENTS = {
+  // Block code: use the raw hast `node` to detect and extract code, bypassing
+  // react-markdown's component wrapping (child.type would be our code fn, not 'code').
+  pre({ node, children }) {
+    const codeNode = node?.children?.find(n => n.type === 'element' && n.tagName === 'code');
+    if (codeNode) {
+      const className = codeNode.properties?.className?.[0] || '';
+      const lang = /language-(\w+)/.exec(className)?.[1] || '';
+      const code = codeNode.children?.map(c => c.value ?? '').join('').replace(/\n$/, '');
+      return <CodeBlock lang={lang} code={code} />;
     }
-  }
-  return foldMixedList(items);
-}
+    return <pre>{children}</pre>;
+  },
+  // Inline code — only fires for backtick spans; block code is consumed by pre above
+  code({ className, children }) {
+    if (className?.startsWith('language-')) return <code>{children}</code>; // fallback, should not reach
+    return <code className="md-ic">{children}</code>;
+  },
+  // Headings mapped to h3–h6 (h1/h2 stay in page chrome, not content)
+  h1: ({ children }) => <h3 className="md-h md-h1">{children}</h3>,
+  h2: ({ children }) => <h4 className="md-h md-h2">{children}</h4>,
+  h3: ({ children }) => <h4 className="md-h md-h3">{children}</h4>,
+  h4: ({ children }) => <h5 className="md-h md-h4">{children}</h5>,
+  h5: ({ children }) => <h6 className="md-h md-h5">{children}</h6>,
+  h6: ({ children }) => <h6 className="md-h md-h6">{children}</h6>,
+  // Lists
+  ul: ({ children }) => <ul className="md-ul">{children}</ul>,
+  ol: ({ children }) => <ol className="md-ol">{children}</ol>,
+  li: ({ children, className }) => (
+    <li className={className?.includes('task') ? 'md-task-item' : ''}>{children}</li>
+  ),
+  // Misc
+  p:          ({ children }) => <p className="md-p">{children}</p>,
+  blockquote: ({ children }) => <blockquote className="md-bq">{children}</blockquote>,
+  hr:         () => <hr className="md-hr" />,
+  a:          ({ href, children }) => <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,
+  // Tables
+  table: ({ children }) => <div className="md-table-wrap"><table className="md-table">{children}</table></div>,
+  input: ({ type, checked }) =>
+    type === 'checkbox'
+      ? <span className={`md-checkbox ${checked ? 'checked' : ''}`} aria-hidden="true">{checked ? '☑' : '☐'}</span>
+      : null,
+};
 
-// Fold same-indent ul items that follow an ol item into that item's children.
-// This covers LLM output like "1. Heading\n- sub\n- sub" (no extra indentation).
-function foldMixedList(items) {
-  const out = [];
-  for (let i = 0; i < items.length; i++) {
-    const item = { ...items[i] };
-    if (item.kind === 'ol' && !item.children) {
-      const sub = [];
-      while (i + 1 < items.length && items[i + 1].kind === 'ul' && items[i + 1].indent <= item.indent) {
-        sub.push(items[i + 1]);
-        i++;
-      }
-      if (sub.length) item.children = sub;
-    }
-    out.push(item);
-  }
-  return out;
-}
-
-function renderParsedList(items, keyBase) {
-  if (!items?.length) return null;
-  // Group consecutive same-kind items
-  const groups = [];
-  let cur = null;
-  for (const item of items) {
-    const gk = item.kind;
-    if (!cur || cur.kind !== gk) { cur = { kind: gk, items: [] }; groups.push(cur); }
-    cur.items.push(item);
-  }
-  return groups.map((g, gi) => {
-    const gkey = `${keyBase}-g${gi}`;
-    if (g.kind === 'text') {
-      return g.items.map((it, ii) => <p key={`${gkey}-${ii}`} className="md-p">{renderInline(it.content)}</p>);
-    }
-    if (g.kind === 'ol') {
-      return (
-        <ol key={gkey} className="md-ol">
-          {g.items.map((it, ii) => (
-            <li key={ii}>
-              {renderInline(it.content)}
-              {it.children && renderParsedList(it.children, `${gkey}-${ii}`)}
-            </li>
-          ))}
-        </ol>
-      );
-    }
-    return (
-      <ul key={gkey} className="md-ul">
-        {g.items.map((it, ii) => (
-          <li key={ii} className={it.checked !== undefined ? 'md-task-item' : ''}>
-            {it.checked !== undefined && (
-              <span className={`md-checkbox ${it.checked ? 'checked' : ''}`} aria-hidden="true">
-                {it.checked ? '☑' : '☐'}
-              </span>
-            )}
-            {renderInline(it.content)}
-            {it.children && renderParsedList(it.children, `${gkey}-${ii}`)}
-          </li>
-        ))}
-      </ul>
-    );
-  });
-}
-
-// ─── Table renderer ───────────────────────────────────────────────────────────
-
-function renderTable(lines, key) {
-  const sepIdx = lines.findIndex(l => /^[\s|:-]+$/.test(l) && l.includes('-'));
-  if (sepIdx < 1) return null;
-  const parseRow = line => {
-    const cells = line.split('|');
-    if (cells[0]?.trim() === '') cells.shift();
-    if (cells[cells.length - 1]?.trim() === '') cells.pop();
-    return cells.map(c => c.trim());
-  };
-  const headers = parseRow(lines[sepIdx - 1]);
-  const rows = lines.slice(sepIdx + 1).filter(l => l.trim() && l.includes('|')).map(parseRow);
-  if (!headers.length) return null;
+function MdContent({ children }) {
   return (
-    <div key={key} className="md-table-wrap">
-      <table className="md-table">
-        <thead>
-          <tr>{headers.map((h, i) => <th key={i}>{renderInline(h)}</th>)}</tr>
-        </thead>
-        <tbody>
-          {rows.map((row, ri) => (
-            <tr key={ri}>
-              {row.map((cell, ci) => <td key={ci}>{renderInline(cell)}</td>)}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
+      {children || ''}
+    </ReactMarkdown>
   );
-}
-
-// ─── Block dispatcher ─────────────────────────────────────────────────────────
-
-function renderParaBlock(text, key) {
-  const trimmed = text.trim();
-  if (!trimmed) return null;
-
-  // Headings (up to h3→h5)
-  if (trimmed.startsWith('#')) {
-    const hm = trimmed.match(/^(#{1,3})\s+(.+)$/);
-    if (hm) {
-      const Tag = hm[1].length === 1 ? 'h3' : hm[1].length === 2 ? 'h4' : 'h5';
-      return <Tag key={key} className={`md-h md-h${hm[1].length}`}>{renderInline(hm[2])}</Tag>;
-    }
-  }
-
-  // Horizontal rule
-  if (/^[-*_]{3,}$/.test(trimmed)) return <hr key={key} className="md-hr" />;
-
-  const lines = trimmed.split('\n');
-
-  // Blockquote
-  if (lines.every(l => /^>\s?/.test(l) || !l.trim())) {
-    const inner = lines.map(l => l.replace(/^>\s?/, '')).join('\n');
-    return <blockquote key={key} className="md-bq">{renderInline(inner)}</blockquote>;
-  }
-
-  // Table (needs a separator row with dashes)
-  if (lines.length >= 2 && lines.some(l => l.includes('|'))) {
-    const table = renderTable(lines, key);
-    if (table) return table;
-  }
-
-  // List — triggered if first non-empty line starts with a list marker
-  const firstNonEmpty = lines.find(l => l.trim());
-  if (firstNonEmpty) {
-    const t = firstNonEmpty.trim();
-    if (/^\d+[.)]\s/.test(t) || /^[-*+]\s/.test(t)) {
-      const parsed = parseListBlock(lines);
-      if (parsed.length > 0) {
-        return <React.Fragment key={key}>{renderParsedList(parsed, String(key))}</React.Fragment>;
-      }
-    }
-  }
-
-  // Paragraph — preserve single newlines as <br>
-  const inlines = lines.flatMap((l, i) =>
-    i < lines.length - 1 ? [...renderInline(l), <br key={`br${i}`} />] : renderInline(l)
-  );
-  return <p key={key} className="md-p">{inlines}</p>;
-}
-
-function renderMd(text) {
-  const nodes = [];
-  const fenceRe = /```(\w*)\n([\s\S]*?)```/g;
-  let last = 0, m, ki = 0;
-  while ((m = fenceRe.exec(text)) !== null) {
-    if (m.index > last) {
-      text.slice(last, m.index).split(/\n{2,}/).forEach(b => {
-        const n = renderParaBlock(b, ki++);
-        if (n) nodes.push(n);
-      });
-    }
-    nodes.push(<CodeBlock key={ki++} lang={m[1]} code={m[2]} />);
-    last = m.index + m[0].length;
-  }
-  if (last < text.length) {
-    text.slice(last).split(/\n{2,}/).forEach(b => {
-      const n = renderParaBlock(b, ki++);
-      if (n) nodes.push(n);
-    });
-  }
-  return nodes;
 }
 
 // ─── Error / status banners ───────────────────────────────────────────────────
@@ -669,9 +451,8 @@ function UserMessage({ text, images, when }) {
   );
 }
 
-function AIMessage({ content, model, isStreaming, showRag, animate }) {
+function AIMessage({ content, model, isStreaming, showRag }) {
   const showTyping = isStreaming && !content;
-  const { tokens, n, done } = useTokenStream(content || '', 38, animate && !!content);
 
   return (
     <div className="msg">
@@ -693,13 +474,11 @@ function AIMessage({ content, model, isStreaming, showRag, animate }) {
               <span className="cursor" style={{ height: 14, width: 6 }} />
               <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 11, color: 'var(--faint)', letterSpacing: '0.1em' }}>thinking…</span>
             </div>
-          ) : animate ? (
-            <>
-              <StreamedContent tokens={tokens} n={n} />
-              {!done && <span className="cursor" />}
-            </>
           ) : (
-            renderMd(content || '')
+            <>
+              <MdContent>{content}</MdContent>
+              {isStreaming && <span className="cursor" />}
+            </>
           )}
         </div>
       </div>
@@ -1599,7 +1378,6 @@ export default function App() {
                         model={m.model || selectedModel}
                         isStreaming={sending && m.id === 'streaming'}
                         showRag={ragOn && !!activeConv?.assistant_id && idx === messages.length - 1}
-                        animate={sending && m.id === 'streaming'}
                       />
                     )
                   )}

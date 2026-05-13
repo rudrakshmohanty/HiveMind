@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { TextInput } from '@carbon/react';
 import { addPathToAssistant, createAssistant, deleteAssistant, fetchAssistants, fetchIndexStatus, removePathFromAssistant, triggerIndex, updateAssistant } from './api';
 
@@ -24,6 +24,60 @@ function Icon({ name, size = 16, stroke = 1.5 }) {
     code:     <path d="m16 18 6-6-6-6M8 6l-6 6 6 6"/>,
   };
   return <svg {...c}>{paths[name] ?? null}</svg>;
+}
+
+const EMBED_RE = /embed|nomic|mxbai|bge|e5|all-minilm/i;
+
+function categorizeModel(name) {
+  if (EMBED_RE.test(name || '')) return 'rag';
+  return 'chat';
+}
+
+const CAT_COLOR = { high: 'var(--warn)', low: 'var(--ok)', vision: 'var(--accent)', rag: 'var(--muted)', chat: 'var(--ok)' };
+
+function ModelPicker({ value, models, onChange }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const handler = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const chatModels = useMemo(() => models.filter(m => !EMBED_RE.test(m.name)), [models]);
+  const label = value || '— use current —';
+
+  return (
+    <div ref={ref} className="asst-model-picker" style={{ position: 'relative', flex: 1 }}>
+      <button className="asst-model-btn" onClick={() => setOpen(o => !o)}>
+        {value && <span className="asst-model-orb" />}
+        <span>{label}</span>
+        <svg width="10" height="6" viewBox="0 0 10 6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M1 1l4 4 4-4"/></svg>
+      </button>
+      {open && (
+        <div className="asst-model-dropdown">
+          <div
+            className={`asst-model-option ${!value ? 'sel' : ''}`}
+            onClick={() => { onChange(''); setOpen(false); }}
+          >
+            <span style={{ color: 'var(--faint)', fontStyle: 'italic' }}>— use current —</span>
+          </div>
+          {chatModels.map(m => (
+            <div
+              key={m.name}
+              className={`asst-model-option ${m.name === value ? 'sel' : ''}`}
+              onClick={() => { onChange(m.name); setOpen(false); }}
+            >
+              <span className="asst-model-orb" />
+              <span style={{ flex: 1 }}>{m.name}</span>
+              {m.parameter_size && <span style={{ fontSize: 9, color: 'var(--faint)', fontFamily: "'JetBrains Mono', monospace" }}>{m.parameter_size}</span>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function formatDate(value) {
@@ -552,16 +606,11 @@ export default function AssistantsPage({ onOpenChat, onQuickChat, models = [] })
                 {models.length > 0 && (
                   <div className="asst-model-row">
                     <span className="asst-model-label">Model</span>
-                    <select
-                      className="asst-model-select"
+                    <ModelPicker
                       value={assistant.preferred_model || ''}
-                      onChange={e => handleSetPreferredModel(assistant.id, e.target.value)}
-                    >
-                      <option value="">— use current —</option>
-                      {models.filter(m => !/embed|nomic|mxbai|bge|e5|all-minilm/i.test(m.name)).map(m => (
-                        <option key={m.name} value={m.name}>{m.name}</option>
-                      ))}
-                    </select>
+                      models={models}
+                      onChange={m => handleSetPreferredModel(assistant.id, m)}
+                    />
                   </div>
                 )}
 

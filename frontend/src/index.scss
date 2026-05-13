@@ -738,7 +738,7 @@ input, textarea { font-family: inherit; }
 }
 
 .msg-wrap {
-  max-width: 820px;
+  max-width: 90%;
   margin: 0 auto;
   padding: 0 24px;
 }
@@ -854,7 +854,9 @@ input, textarea { font-family: inherit; }
   }
   .md-h1 { font-size: 20px; border-bottom: 1.5px solid var(--line); padding-bottom: 6px; }
   .md-h2 { font-size: 17px; }
-  .md-h3 { font-size: 15px; color: var(--muted); }
+  .md-h3 { font-size: 15px; }
+  .md-h4 { font-size: 13px; color: var(--muted); letter-spacing: 0.02em; }
+  .md-h5, .md-h6 { font-size: 12px; color: var(--faint); text-transform: uppercase; letter-spacing: 0.08em; }
 
   .md-ul {
     list-style: none;
@@ -914,12 +916,16 @@ input, textarea { font-family: inherit; }
   }
 
   .md-ic {
+    display: inline;
     background: var(--accent-tint);
     color: var(--accent);
-    padding: 1px 5px;
+    padding: 2px 5px;
     font-family: 'JetBrains Mono', monospace;
-    font-size: 13px;
+    font-size: 0.87em;
     border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+    line-height: 1;
+    vertical-align: baseline;
+    word-break: break-word;
   }
 
   strong { font-weight: 700; }
@@ -1011,19 +1017,24 @@ input, textarea { font-family: inherit; }
   &:last-child { margin-bottom: 0; }
 
   pre {
-    background: var(--ink);
-    color: var(--bg);
-    padding: 14px 16px;
-    font-family: 'JetBrains Mono', monospace;
+    background: var(--panel-2);
+    color: var(--ink);
+    padding: 14px 18px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 12.5px;
-    line-height: 1.7;
+    line-height: 1.75;
     overflow-x: auto;
     margin: 0;
     border: none;
     box-shadow: none;
     white-space: pre;
+    font-feature-settings: "liga", "calt";
+    -webkit-font-smoothing: antialiased;
 
-    code { background: transparent; color: inherit; padding: 0; font-size: inherit; }
+    &::-webkit-scrollbar { height: 4px; }
+    &::-webkit-scrollbar-thumb { background: var(--line-soft); }
+
+    code { background: transparent; color: inherit; padding: 0; font-size: inherit; font-family: inherit; }
   }
 }
 
@@ -1031,9 +1042,9 @@ input, textarea { font-family: inherit; }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 14px;
-  background: var(--ink);
-  border-bottom: 1px solid color-mix(in srgb, var(--bg) 15%, transparent);
+  padding: 7px 14px;
+  background: var(--panel);
+  border-bottom: 1.5px solid var(--line);
 }
 
 .md-code-lang {
@@ -1050,18 +1061,52 @@ input, textarea { font-family: inherit; }
   align-items: center;
   gap: 5px;
   background: none;
-  border: none;
+  border: 1.5px solid transparent;
   cursor: pointer;
-  color: var(--bg);
+  color: var(--muted);
   font-family: 'JetBrains Mono', monospace;
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.04em;
-  opacity: 0.55;
-  transition: opacity 0.15s;
-  padding: 2px 0;
+  padding: 2px 7px;
+  transition: color 0.12s, border-color 0.12s;
 
-  &:hover { opacity: 1; }
+  &:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+}
+
+/* ─── highlight.js token colors — HiveMind palette ──────────────────────────
+   Uses design system variables so tokens adapt to light / dark theme.
+*/
+.md-code-block {
+  .hljs-keyword,
+  .hljs-selector-tag        { color: var(--accent); font-weight: 600; }
+  .hljs-string,
+  .hljs-attr                { color: var(--ok); }
+  .hljs-number,
+  .hljs-literal             { color: var(--warn); }
+  .hljs-comment             { color: var(--muted); font-style: italic; }
+  .hljs-function,
+  .hljs-title,
+  .hljs-title.function_     { color: var(--accent); }
+  .hljs-type,
+  .hljs-class               { color: var(--warn); font-weight: 600; }
+  .hljs-variable,
+  .hljs-params              { color: var(--ink-2); }
+  .hljs-tag                 { color: var(--err); }
+  .hljs-name                { color: var(--err); }
+  .hljs-built_in            { color: color-mix(in srgb, var(--accent) 70%, var(--ok)); }
+  .hljs-operator,
+  .hljs-punctuation         { color: var(--faint); }
+  .hljs-meta                { color: var(--muted); }
+  .hljs-deletion            { color: var(--err); background: color-mix(in srgb, var(--err) 10%, transparent); display: block; }
+  .hljs-addition            { color: var(--ok);  background: color-mix(in srgb, var(--ok)  10%, transparent); display: block; }
+  .hljs-emphasis            { font-style: italic; }
+  .hljs-strong              { font-weight: 700; }
+  .hljs-section             { color: var(--accent); font-weight: 700; }
+  .hljs-link                { color: var(--ok); text-decoration: underline; }
 }
 
 /* per-token fade-in for streamed AI replies */
@@ -1925,21 +1970,66 @@ input, textarea { font-family: inherit; }
   flex-shrink: 0;
 }
 
-.asst-model-select {
-  flex: 1;
+.asst-model-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 8px;
   background: var(--panel-2);
   border: 1.5px solid var(--line-soft);
   color: var(--ink);
   font-family: 'JetBrains Mono', monospace;
   font-size: 11px;
-  padding: 4px 8px;
-  outline: none;
   cursor: pointer;
-  border-radius: 0;
-  min-width: 0;
+  text-align: left;
+  transition: border-color 0.12s, background 0.12s;
 
-  &:focus { border-color: var(--accent); }
-  option { background: var(--panel); }
+  span:nth-child(2) { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  svg { flex-shrink: 0; color: var(--faint); }
+
+  &:hover { background: var(--panel); border-color: var(--line); }
+}
+
+.asst-model-orb {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+  box-shadow: 0 0 6px var(--accent);
+}
+
+.asst-model-dropdown {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  background: var(--panel);
+  border: 1.5px solid var(--line);
+  box-shadow: var(--shadow-block);
+  z-index: 40;
+  max-height: 220px;
+  overflow-y: auto;
+  animation: dropdownIn 0.12s ease-out;
+
+  &::-webkit-scrollbar { width: 4px; }
+  &::-webkit-scrollbar-thumb { background: var(--line-soft); }
+}
+
+.asst-model-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--ink);
+  cursor: pointer;
+  transition: background 0.1s;
+
+  &:hover { background: var(--accent-tint); }
+  &.sel { background: var(--accent-soft); color: var(--accent); }
 }
 
 .asst-card-foot {
@@ -2189,6 +2279,9 @@ input, textarea { font-family: inherit; }
 /* ============================================================
    CARBON OVERRIDES — minimal, only what's needed
 ============================================================ */
+
+/* Prevent Carbon from making <code> block-level inside message content */
+.md-content code:not([class]) { display: inline !important; }
 
 .cds--btn { border-radius: 0 !important; }
 .cds--btn--primary { background: var(--ink) !important; color: var(--bg) !important; border-color: var(--ink) !important; }
