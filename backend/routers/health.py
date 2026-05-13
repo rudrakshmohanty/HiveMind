@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 try:
     from .. import schemas
@@ -24,7 +24,13 @@ async def health_status():
 @router.get("/models", response_model=schemas.OllamaModelsResponse)
 async def get_models():
     """Get available Ollama models, excluding embedding-only models."""
-    models = await ollama_service.get_available_models()
+    try:
+        models = await ollama_service.get_available_models()
+    except Exception:
+        raise HTTPException(
+            status_code=502,
+            detail="Ollama is unreachable — run `ollama serve` in a terminal",
+        )
     chat_models = [m for m in models if "embed" not in m.get("name", "").lower()]
     return schemas.OllamaModelsResponse(models=[
         schemas.OllamaModel(**m) for m in chat_models

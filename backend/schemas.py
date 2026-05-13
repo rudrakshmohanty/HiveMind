@@ -103,6 +103,7 @@ class AssistantUpdateRequest(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=100)
     description: Optional[str] = None
     codebase_path: Optional[str] = Field(default=None, min_length=1)
+    preferred_model: Optional[str] = None
 
 
 class AssistantInfo(BaseModel):
@@ -112,9 +113,11 @@ class AssistantInfo(BaseModel):
     name: str
     description: str
     codebase_path: str
+    extra_paths: List[str] = []
     indexed_files: int
     total_chunks: int
     index_status: str
     last_indexed: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
+    preferred_model: Optional[str] = None

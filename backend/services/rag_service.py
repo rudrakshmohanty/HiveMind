@@ -234,22 +234,12 @@ def chunk_file(content: str, file_path: str) -> list[dict]:
 # File collection
 # ---------------------------------------------------------------------------
 
-def collect_files(codebase_path: str) -> list[Path]:
-    """
-    Walk the directory tree and return all indexable source files,
-    skipping build artifacts, dependencies, and oversized files.
-    """
-    root = Path(codebase_path).expanduser().resolve()
-    if not root.exists():
-        raise ValueError(f"Path does not exist: {codebase_path}")
-
-    files = []
+def _scan_root(root: Path, prefix: str) -> list[tuple[Path, str]]:
+    """Walk one directory and return (absolute_path, file_key) pairs."""
+    result = []
     for path in root.rglob("*"):
         if not path.is_file():
             continue
-        # Check only parts relative to root so parent dirs outside the
-        # codebase (e.g. a "build" or "env" folder in the user's home) don't
-        # accidentally block everything.
         rel = path.relative_to(root)
         if any(part in SKIP_DIRS for part in rel.parts):
             continue
@@ -260,8 +250,28 @@ def collect_files(codebase_path: str) -> list[Path]:
                 continue
         except OSError:
             continue
-        files.append(path)
-    return files
+        result.append((path, f"{prefix}{rel}"))
+    return result
+
+
+def collect_files(codebase_path: str, extra_paths: Optional[list] = None) -> list:
+    """
+    Walk all directories and return (absolute_path, file_key) pairs.
+
+    Main codebase: file_key = relative/path.py
+    Extra paths:   file_key = [root_name]/relative/path.py
+    This prevents key collisions when merging multiple codebases.
+    """
+    main_root = Path(codebase_path).expanduser().resolve()
+    if not main_root.exists():
+        raise ValueError(f"Path does not exist: {codebase_path}")
+
+    result = _scan_root(main_root, "")
+    for ep in (extra_paths or []):
+        ep_root = Path(ep).expanduser().resolve()
+        if ep_root.exists():
+            result.extend(_scan_root(ep_root, f"[{ep_root.name}]/"))
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +281,7 @@ def collect_files(codebase_path: str) -> list[Path]:
 async def index_codebase(
     assistant_id: str,
     codebase_path: str,
+    extra_paths: Optional[list] = None,
     on_progress: Optional[callable] = None,
     force_full: bool = False,
 ) -> dict:
@@ -307,26 +318,25 @@ async def index_codebase(
     CancelledError propagates through every `await`, so deleting an assistant
     mid-index stops all concurrent tasks at the next network call.
     """
-    files = collect_files(codebase_path)
-    total_files = len(files)
+    files_with_keys = collect_files(codebase_path, extra_paths)
+    total_files = len(files_with_keys)
     collection = get_collection(assistant_id)
 
-    # rel_path → Path for the current codebase state
-    current_files: dict[str, Path] = {
-        str(f.relative_to(codebase_path)): f for f in files
-    }
+    # file_key → absolute Path for the current codebase state
+    current_files: dict[str, Path] = {key: path for path, key in files_with_keys}
 
     if force_full:
         # Wipe everything and queue every file for embedding
         existing = collection.get()
         if existing["ids"]:
             await asyncio.to_thread(collection.delete, ids=existing["ids"])
-        to_index: list[tuple[str, str, str]] = []   # (rel_path, content, hash)
-        for rel_path, file_path in current_files.items():
+        to_index: list[tuple[str, str, str, float]] = []   # (file_key, content, hash, mtime)
+        for file_key, file_path in current_files.items():
             try:
                 content = file_path.read_text(encoding="utf-8", errors="ignore")
+                mtime = file_path.stat().st_mtime
                 if content.strip():
-                    to_index.append((rel_path, content, file_content_hash(content)))
+                    to_index.append((file_key, content, file_content_hash(content), mtime))
             except Exception:
                 pass
         skipped = 0
@@ -355,10 +365,30 @@ async def index_codebase(
             gone_ids = [doc_id for r in removed for doc_id in ids_by_file[r]]
             await asyncio.to_thread(collection.delete, ids=gone_ids)
 
+        # Load mtime stamps stored in existing chunk metadata
+        mtime_by_file: dict[str, float] = {}
+        for meta in (existing_data.get("metadatas") or []):
+            if meta:
+                rel = meta.get("file")
+                mt  = meta.get("mtime")
+                if rel and mt and rel not in mtime_by_file:
+                    mtime_by_file[rel] = float(mt)
+
         # Decide which files need re-embedding
         to_index = []
         skipped  = 0
-        for rel_path, file_path in current_files.items():
+        for file_key, file_path in current_files.items():
+            try:
+                stat = file_path.stat()
+            except OSError:
+                skipped += 1
+                continue
+
+            # Fast path: mtime unchanged → skip before even reading the file
+            if mtime_by_file.get(file_key) == stat.st_mtime and file_key in hash_by_file:
+                skipped += 1
+                continue
+
             try:
                 content = file_path.read_text(encoding="utf-8", errors="ignore")
             except Exception:
@@ -366,16 +396,16 @@ async def index_codebase(
                 continue
 
             current_hash = file_content_hash(content)
-            if hash_by_file.get(rel_path) == current_hash:
-                skipped += 1    # unchanged — keep existing chunks as-is
+            if hash_by_file.get(file_key) == current_hash:
+                skipped += 1    # content identical despite mtime change (e.g. touch) — keep as-is
                 continue
 
             # Changed or new file — remove stale chunks before re-embedding
-            if rel_path in ids_by_file:
-                await asyncio.to_thread(collection.delete, ids=ids_by_file[rel_path])
+            if file_key in ids_by_file:
+                await asyncio.to_thread(collection.delete, ids=ids_by_file[file_key])
 
             if content.strip():
-                to_index.append((rel_path, content, current_hash))
+                to_index.append((file_key, content, current_hash, stat.st_mtime))
 
     # state["done"] starts at `skipped` so the progress bar reflects files
     # that were already up-to-date as immediately processed.
@@ -385,7 +415,7 @@ async def index_codebase(
     if on_progress:
         on_progress(state["done"], total_files, 0)
 
-    async def process_file(rel_path: str, content: str, content_hash: str) -> None:
+    async def process_file(rel_path: str, content: str, content_hash: str, mtime: float = 0.0) -> None:
         async with semaphore:
             try:
                 chunks = chunk_file(content, rel_path)
@@ -410,6 +440,7 @@ async def index_codebase(
                                 "start_line": c["start_line"],
                                 "end_line": c["end_line"],
                                 "hash": content_hash,
+                                "mtime": mtime,
                             }
                             for c in chunks
                         ],
@@ -427,7 +458,7 @@ async def index_codebase(
                 if on_progress:
                     on_progress(state["done"], total_files, state["new_chunks"])
 
-    await asyncio.gather(*[process_file(r, c, h) for r, c, h in to_index])
+    await asyncio.gather(*[process_file(r, c, h, mt) for r, c, h, mt in to_index])
 
     # Query live count so total_chunks reflects unchanged + newly added chunks.
     total_chunks = await asyncio.to_thread(collection.count)

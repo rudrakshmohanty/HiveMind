@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import {
   createConversation,
   deleteConversation,
@@ -45,6 +45,26 @@ const SAMPLE_CHUNKS = [
 ];
 
 const MULTIMODAL_RE = /llava|moondream|bakllava|minicpm.?v|cogvlm|internvl|phi.*vision|vision|gemma4|nemotron3/i;
+const EMBED_RE     = /embed|nomic|mxbai|bge|e5|all-minilm/i;
+const THINK_RE     = /deepseek.*r|qwq|o1|thinking|reason|reflection|:70b|:72b|:671b|:405b/i;
+
+function categorizeModel(name) {
+  const n = name || '';
+  if (EMBED_RE.test(n))     return 'rag';
+  if (MULTIMODAL_RE.test(n)) return 'vision';
+  if (THINK_RE.test(n))     return 'high';
+  return 'low';
+}
+
+const MODEL_CATEGORY_LABELS = {
+  high:   '⬤ High — thinking / heavy',
+  low:    '⬤ Low — fast / everyday',
+  vision: '⬤ Vision — multimodal',
+  rag:    '⬤ RAG — embedding only',
+};
+
+const MAX_IMAGE_MB = 10;
+const MAX_IMAGE_BYTES = MAX_IMAGE_MB * 1024 * 1024;
 
 // ─── Icon component ──────────────────────────────────────────────────────────
 
@@ -87,10 +107,70 @@ function Icon({ name, size = 16, stroke = 1.5 }) {
   return <svg {...c}>{paths[name] ?? null}</svg>;
 }
 
+// ─── Error Boundary ───────────────────────────────────────────────────────────
+
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error) { return { error }; }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div className="error-crash">
+        <div className="error-crash-panel">
+          <div className="error-crash-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M10.3 3.3 1.6 18a2 2 0 0 0 1.7 3h17.4a2 2 0 0 0 1.7-3L13.7 3.3a2 2 0 0 0-3.4 0z"/>
+              <path d="M12 9v4M12 17h.01"/>
+            </svg>
+          </div>
+          <h2>Something crashed</h2>
+          <p>HiveMind hit an unexpected error. This is a bug, not you.</p>
+          <div className="error-crash-detail">{this.state.error.message}</div>
+          <div className="error-crash-actions">
+            <button className="btn-block outline" onClick={() => this.setState({ error: null })}>
+              Try to recover
+            </button>
+            <button className="btn-block accent" onClick={() => window.location.reload()}>
+              Reload page
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function getErr(e, fallback) { return e instanceof Error ? e.message : fallback; }
 function isMultimodal(n) { return MULTIMODAL_RE.test(n || ''); }
+
+function useNetworkStatus() {
+  const [online, setOnline] = useState(navigator.onLine);
+  useEffect(() => {
+    const up = () => setOnline(true);
+    const down = () => setOnline(false);
+    window.addEventListener('online', up);
+    window.addEventListener('offline', down);
+    return () => { window.removeEventListener('online', up); window.removeEventListener('offline', down); };
+  }, []);
+  return online;
+}
+
+function getErrorHint(msg) {
+  if (!msg) return null;
+  if (msg.includes('ollama serve') || msg.includes('unreachable') || msg.includes('502'))
+    return 'Run `ollama serve` in a terminal, then refresh.';
+  if (msg.includes('cannot reach') || msg.includes('server running'))
+    return 'Make sure the HiveMind backend is running.';
+  if (msg.includes('no model') || msg.includes('model'))
+    return 'Select a model from the dropdown, or run `ollama pull <model>`.';
+  return null;
+}
 
 function formatTime(v) {
   if (!v) return '';
@@ -198,68 +278,216 @@ function CodeBlock({ lang, code }) {
   );
 }
 
+// Inline: bold, italic, code, strikethrough, links
 function renderInline(text) {
-  const re = /(`[^`\n]+`)|(\*\*([^*\n]+)\*\*)|(\*([^*\n]+)\*)|(_([^_\n]+)_)|(\[([^\]]+)\]\(([^)]+)\))/g;
+  if (!text) return [];
+  const re = /(`[^`\n]+`)|(\*\*([^*\n]+)\*\*)|(\*([^*\n]+)\*)|(_([^_\n]+)_)|(~~([^~\n]+)~~)|(\[([^\]]+)\]\(([^)]+)\))/g;
   const nodes = [];
   let last = 0, m, k = 0;
   while ((m = re.exec(text)) !== null) {
     if (m.index > last) nodes.push(text.slice(last, m.index));
-    if (m[1]) nodes.push(<code key={k++} className="md-ic">{m[1].slice(1, -1)}</code>);
-    else if (m[2]) nodes.push(<strong key={k++}>{m[3]}</strong>);
-    else if (m[4]) nodes.push(<em key={k++}>{m[5]}</em>);
-    else if (m[6]) nodes.push(<em key={k++}>{m[7]}</em>);
-    else if (m[8]) nodes.push(<a key={k++} href={m[10]} target="_blank" rel="noopener noreferrer">{m[9]}</a>);
+    if (m[1])  nodes.push(<code key={k++} className="md-ic">{m[1].slice(1, -1)}</code>);
+    else if (m[2])  nodes.push(<strong key={k++}>{m[3]}</strong>);
+    else if (m[4])  nodes.push(<em key={k++}>{m[5]}</em>);
+    else if (m[6])  nodes.push(<em key={k++}>{m[7]}</em>);
+    else if (m[8])  nodes.push(<s key={k++}>{m[9]}</s>);
+    else if (m[10]) nodes.push(<a key={k++} href={m[12]} target="_blank" rel="noopener noreferrer">{m[11]}</a>);
     last = m.index + m[0].length;
   }
   if (last < text.length) nodes.push(text.slice(last));
   return nodes;
 }
 
+// ─── List parser ─────────────────────────────────────────────────────────────
+// Parses lines into a flat array of {kind, content, checked, children, indent}.
+// Indented lines become children; same-indent ul items after an ol item are
+// also folded in as children (handles LLM output that omits indent).
+
+function parseListBlock(lines) {
+  const items = [];
+  let i = 0;
+  while (i < lines.length) {
+    const raw = lines[i];
+    const trimmed = raw.trim();
+    if (!trimmed) { i++; continue; }
+    const indent = raw.length - raw.trimStart().length;
+    const olM   = trimmed.match(/^(\d+)[.)]\s+(.*)$/);
+    const taskM = trimmed.match(/^[-*+]\s+\[([ xX])\]\s+(.*)$/);
+    const ulM   = !taskM && trimmed.match(/^[-*+]\s+(.*)$/);
+
+    if (olM || taskM || ulM) {
+      const content = olM ? olM[2] : taskM ? taskM[2] : ulM[1];
+      const kind    = olM ? 'ol' : 'ul';
+      const checked = taskM ? taskM[1].toLowerCase() === 'x' : undefined;
+
+      // Collect explicitly indented child lines
+      const childLines = [];
+      i++;
+      while (i < lines.length) {
+        const next = lines[i];
+        if (!next.trim()) { i++; continue; }
+        const ni = next.length - next.trimStart().length;
+        if (ni > indent) {
+          childLines.push(next.slice(Math.min(ni, indent + 2)));
+          i++;
+        } else break;
+      }
+      const children = childLines.length > 0 ? parseListBlock(childLines) : null;
+      items.push({ kind, content, checked, children, indent });
+    } else {
+      // Non-list line: append to previous item as continuation
+      if (items.length > 0) {
+        items[items.length - 1].content += ' ' + trimmed;
+      } else {
+        items.push({ kind: 'text', content: trimmed, indent: 0 });
+      }
+      i++;
+    }
+  }
+  return foldMixedList(items);
+}
+
+// Fold same-indent ul items that follow an ol item into that item's children.
+// This covers LLM output like "1. Heading\n- sub\n- sub" (no extra indentation).
+function foldMixedList(items) {
+  const out = [];
+  for (let i = 0; i < items.length; i++) {
+    const item = { ...items[i] };
+    if (item.kind === 'ol' && !item.children) {
+      const sub = [];
+      while (i + 1 < items.length && items[i + 1].kind === 'ul' && items[i + 1].indent <= item.indent) {
+        sub.push(items[i + 1]);
+        i++;
+      }
+      if (sub.length) item.children = sub;
+    }
+    out.push(item);
+  }
+  return out;
+}
+
+function renderParsedList(items, keyBase) {
+  if (!items?.length) return null;
+  // Group consecutive same-kind items
+  const groups = [];
+  let cur = null;
+  for (const item of items) {
+    const gk = item.kind;
+    if (!cur || cur.kind !== gk) { cur = { kind: gk, items: [] }; groups.push(cur); }
+    cur.items.push(item);
+  }
+  return groups.map((g, gi) => {
+    const gkey = `${keyBase}-g${gi}`;
+    if (g.kind === 'text') {
+      return g.items.map((it, ii) => <p key={`${gkey}-${ii}`} className="md-p">{renderInline(it.content)}</p>);
+    }
+    if (g.kind === 'ol') {
+      return (
+        <ol key={gkey} className="md-ol">
+          {g.items.map((it, ii) => (
+            <li key={ii}>
+              {renderInline(it.content)}
+              {it.children && renderParsedList(it.children, `${gkey}-${ii}`)}
+            </li>
+          ))}
+        </ol>
+      );
+    }
+    return (
+      <ul key={gkey} className="md-ul">
+        {g.items.map((it, ii) => (
+          <li key={ii} className={it.checked !== undefined ? 'md-task-item' : ''}>
+            {it.checked !== undefined && (
+              <span className={`md-checkbox ${it.checked ? 'checked' : ''}`} aria-hidden="true">
+                {it.checked ? '☑' : '☐'}
+              </span>
+            )}
+            {renderInline(it.content)}
+            {it.children && renderParsedList(it.children, `${gkey}-${ii}`)}
+          </li>
+        ))}
+      </ul>
+    );
+  });
+}
+
+// ─── Table renderer ───────────────────────────────────────────────────────────
+
+function renderTable(lines, key) {
+  const sepIdx = lines.findIndex(l => /^[\s|:-]+$/.test(l) && l.includes('-'));
+  if (sepIdx < 1) return null;
+  const parseRow = line => {
+    const cells = line.split('|');
+    if (cells[0]?.trim() === '') cells.shift();
+    if (cells[cells.length - 1]?.trim() === '') cells.pop();
+    return cells.map(c => c.trim());
+  };
+  const headers = parseRow(lines[sepIdx - 1]);
+  const rows = lines.slice(sepIdx + 1).filter(l => l.trim() && l.includes('|')).map(parseRow);
+  if (!headers.length) return null;
+  return (
+    <div key={key} className="md-table-wrap">
+      <table className="md-table">
+        <thead>
+          <tr>{headers.map((h, i) => <th key={i}>{renderInline(h)}</th>)}</tr>
+        </thead>
+        <tbody>
+          {rows.map((row, ri) => (
+            <tr key={ri}>
+              {row.map((cell, ci) => <td key={ci}>{renderInline(cell)}</td>)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ─── Block dispatcher ─────────────────────────────────────────────────────────
+
 function renderParaBlock(text, key) {
   const trimmed = text.trim();
   if (!trimmed) return null;
 
-  // Heading
-  const hm = trimmed.match(/^(#{1,3})\s+(.+)$/);
-  if (hm) {
-    const Tag = hm[1].length === 1 ? 'h3' : hm[1].length === 2 ? 'h4' : 'h5';
-    return <Tag key={key} className={`md-h md-h${hm[1].length}`}>{renderInline(hm[2])}</Tag>;
+  // Headings (up to h3→h5)
+  if (trimmed.startsWith('#')) {
+    const hm = trimmed.match(/^(#{1,3})\s+(.+)$/);
+    if (hm) {
+      const Tag = hm[1].length === 1 ? 'h3' : hm[1].length === 2 ? 'h4' : 'h5';
+      return <Tag key={key} className={`md-h md-h${hm[1].length}`}>{renderInline(hm[2])}</Tag>;
+    }
   }
 
-  // HR
+  // Horizontal rule
   if (/^[-*_]{3,}$/.test(trimmed)) return <hr key={key} className="md-hr" />;
 
   const lines = trimmed.split('\n');
 
   // Blockquote
-  if (lines.every(l => /^>\s?/.test(l) || l.trim() === '')) {
+  if (lines.every(l => /^>\s?/.test(l) || !l.trim())) {
     const inner = lines.map(l => l.replace(/^>\s?/, '')).join('\n');
     return <blockquote key={key} className="md-bq">{renderInline(inner)}</blockquote>;
   }
 
-  // Unordered list
-  if (lines.every(l => /^[-*+]\s/.test(l.trim()) || l.trim() === '')) {
-    return (
-      <ul key={key} className="md-ul">
-        {lines.filter(l => /^[-*+]\s/.test(l.trim())).map((l, i) => (
-          <li key={i}>{renderInline(l.trim().replace(/^[-*+]\s/, ''))}</li>
-        ))}
-      </ul>
-    );
+  // Table (needs a separator row with dashes)
+  if (lines.length >= 2 && lines.some(l => l.includes('|'))) {
+    const table = renderTable(lines, key);
+    if (table) return table;
   }
 
-  // Ordered list
-  if (lines.every(l => /^\d+\.\s/.test(l.trim()) || l.trim() === '')) {
-    return (
-      <ol key={key} className="md-ol">
-        {lines.filter(l => /^\d+\.\s/.test(l.trim())).map((l, i) => (
-          <li key={i}>{renderInline(l.trim().replace(/^\d+\.\s+/, ''))}</li>
-        ))}
-      </ol>
-    );
+  // List — triggered if first non-empty line starts with a list marker
+  const firstNonEmpty = lines.find(l => l.trim());
+  if (firstNonEmpty) {
+    const t = firstNonEmpty.trim();
+    if (/^\d+[.)]\s/.test(t) || /^[-*+]\s/.test(t)) {
+      const parsed = parseListBlock(lines);
+      if (parsed.length > 0) {
+        return <React.Fragment key={key}>{renderParsedList(parsed, String(key))}</React.Fragment>;
+      }
+    }
   }
 
-  // Paragraph — single newlines → <br>
+  // Paragraph — preserve single newlines as <br>
   const inlines = lines.flatMap((l, i) =>
     i < lines.length - 1 ? [...renderInline(l), <br key={`br${i}`} />] : renderInline(l)
   );
@@ -287,6 +515,74 @@ function renderMd(text) {
     });
   }
   return nodes;
+}
+
+// ─── Error / status banners ───────────────────────────────────────────────────
+
+function OfflineBanner() {
+  return (
+    <div className="offline-banner">
+      <Icon name="warning" size={13} />
+      <span>Your browser reports no network — HiveMind runs locally so this shouldn't affect most things</span>
+    </div>
+  );
+}
+
+function ErrorBanner({ message, onDismiss, onRetry }) {
+  if (!message) return null;
+  const hint = getErrorHint(message);
+  return (
+    <div className="error-banner">
+      <div className="error-banner-inner">
+        <Icon name="warning" size={14} />
+        <div className="error-banner-text">
+          <span>{message}</span>
+          {hint && <span className="error-banner-hint">{hint}</span>}
+        </div>
+        {onRetry && (
+          <button className="error-banner-action" onClick={onRetry} title="Retry">
+            <Icon name="refresh" size={12} /> Retry
+          </button>
+        )}
+        {onDismiss && (
+          <button className="error-banner-dismiss" onClick={onDismiss} title="Dismiss">
+            <Icon name="x" size={12} />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function OllamaOfflineNotice({ onRetry }) {
+  return (
+    <div className="ollama-offline-notice">
+      <div className="ollama-offline-icon"><Icon name="warning" size={24} /></div>
+      <h3>Ollama is offline</h3>
+      <p>HiveMind needs Ollama to generate responses. Start it from your terminal, then retry.</p>
+      <div className="ollama-offline-cmd">
+        <span className="ollama-offline-prompt">$</span>
+        <code>ollama serve</code>
+      </div>
+      {onRetry && (
+        <button className="btn-block accent" style={{ marginTop: 12 }} onClick={onRetry}>
+          <Icon name="refresh" size={13} /> Check again
+        </button>
+      )}
+    </div>
+  );
+}
+
+function NoModelBanner({ models }) {
+  if (models.length > 0) return null;
+  return (
+    <div className="no-model-banner">
+      <div className="no-model-banner-inner">
+        <Icon name="warning" size={13} />
+        <span>No chat models loaded — run <code>ollama pull &lt;model&gt;</code> to get started</span>
+      </div>
+    </div>
+  );
 }
 
 // ─── RAG panel ───────────────────────────────────────────────────────────────
@@ -445,8 +741,9 @@ function EmptyState({ onPrompt, status, modelName, convCount }) {
 
 // ─── Composer ─────────────────────────────────────────────────────────────────
 
-function Composer({ onSend, ragOn, setRagOn, asstName, disabled, attachedImages, onAttach, onRemoveImage, canAttach }) {
+function Composer({ onSend, ragOn, setRagOn, asstName, disabled, attachedImages, onAttach, onRemoveImage, canAttach, attachError, onClearAttachError }) {
   const [v, setV] = useState('');
+  const [localAttachErr, setLocalAttachErr] = useState('');
   const ref = useRef(null);
   const fileRef = useRef(null);
 
@@ -491,13 +788,33 @@ function Composer({ onSend, ragOn, setRagOn, asstName, disabled, attachedImages,
           disabled={disabled}
         />
 
-        <input ref={fileRef} type="file" accept="image/*" multiple style={{ display: 'none' }} onChange={async e => {
+        <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple style={{ display: 'none' }} onChange={async e => {
           const files = Array.from(e.target.files || []);
           e.target.value = '';
           if (!files.length) return;
-          const urls = await Promise.all(files.map(readFileAsDataUrl));
-          onAttach?.(urls.map((dataUrl, i) => ({ id: `img-${Date.now()}-${i}`, dataUrl, base64: dataUrl.split(',')[1] })));
+          const oversized = files.filter(f => f.size > MAX_IMAGE_BYTES);
+          if (oversized.length > 0) {
+            setLocalAttachErr(`${oversized.map(f => f.name).join(', ')} exceed${oversized.length === 1 ? 's' : ''} the ${MAX_IMAGE_MB} MB limit`);
+            return;
+          }
+          setLocalAttachErr('');
+          try {
+            const urls = await Promise.all(files.map(readFileAsDataUrl));
+            onAttach?.(urls.map((dataUrl, i) => ({ id: `img-${Date.now()}-${i}`, dataUrl, base64: dataUrl.split(',')[1] })));
+          } catch (err) {
+            setLocalAttachErr(`Could not read image: ${err.message}`);
+          }
         }} />
+
+        {(localAttachErr || attachError) && (
+          <div className="composer-attach-err">
+            <Icon name="warning" size={12} />
+            <span>{localAttachErr || attachError}</span>
+            <button onClick={() => { setLocalAttachErr(''); onClearAttachError?.(); }}>
+              <Icon name="x" size={10} />
+            </button>
+          </div>
+        )}
 
         <div className="composer-bar">
           <div className="composer-tools">
@@ -508,15 +825,16 @@ function Composer({ onSend, ragOn, setRagOn, asstName, disabled, attachedImages,
             >
               <Icon name="book" size={14} />
             </button>
-            <button
-              className="cm-tool"
-              title={canAttach ? 'Attach image' : 'Select a vision model to attach images'}
-              disabled={!canAttach}
-              onClick={() => canAttach && fileRef.current?.click()}
-              style={{ opacity: canAttach ? 1 : 0.4 }}
-            >
-              <Icon name="paperclip" size={14} />
-            </button>
+            <div className="cm-attach-wrap" title={canAttach ? 'Attach image (PNG, JPEG, WebP, GIF · max 10 MB)' : 'Vision not supported — switch to llava or another vision model'}>
+              <button
+                className={`cm-tool ${!canAttach ? 'incompatible' : ''}`}
+                disabled={!canAttach}
+                onClick={() => canAttach && fileRef.current?.click()}
+              >
+                <Icon name="paperclip" size={14} />
+              </button>
+              {!canAttach && <span className="cm-attach-badge">vision only</span>}
+            </div>
             <button className="cm-tool" title="Voice input (coming soon)" disabled style={{ opacity: 0.35 }}>
               <Icon name="mic" size={14} />
             </button>
@@ -550,30 +868,51 @@ function ModelSelect({ value, models, onChange }) {
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
+  const grouped = useMemo(() => {
+    const g = { high: [], low: [], vision: [], rag: [] };
+    models.forEach(m => g[categorizeModel(m.name)].push(m));
+    return g;
+  }, [models]);
+
+  const categoryOrder = ['high', 'low', 'vision', 'rag'];
+
   return (
     <div ref={ref} style={{ position: 'relative' }}>
       <button className="model-select" onClick={() => setOpen(o => !o)}>
         <span className="orb" />
         <span>{value || 'Select model'}</span>
+        <span className={`model-cat-badge cat-${categorizeModel(value)}`}>{categorizeModel(value)}</span>
         <Icon name="chevron" size={11} />
       </button>
       {open && (
-        <div className="dropdown" onMouseLeave={() => setOpen(false)}>
+        <div className="dropdown model-dropdown" onMouseLeave={() => setOpen(false)}>
           {models.length === 0 && (
             <div className="dropdown-item" style={{ opacity: 0.5 }}>No models loaded</div>
           )}
-          {models.map(m => (
-            <div
-              key={m.name}
-              className={`dropdown-item ${m.name === value ? 'sel' : ''}`}
-              onClick={() => { onChange(m.name); setOpen(false); }}
-            >
-              <div>
-                <div style={{ fontWeight: 600, fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>{m.name}</div>
-                <div className="meta">{m.parameter_size || 'local'}</div>
+          {categoryOrder.map(cat => {
+            const items = grouped[cat];
+            if (!items.length) return null;
+            return (
+              <div key={cat}>
+                <div className={`model-group-label cat-${cat}`}>{MODEL_CATEGORY_LABELS[cat]}</div>
+                {items.map(m => (
+                  <div
+                    key={m.name}
+                    className={`dropdown-item ${m.name === value ? 'sel' : ''}`}
+                    onClick={() => { onChange(m.name); setOpen(false); }}
+                  >
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>{m.name}</div>
+                      <div className="meta">{m.parameter_size || 'local'}</div>
+                    </div>
+                    {cat === 'vision' && <span className="model-vision-badge">vision</span>}
+                    {cat === 'high' && <span className="model-vision-badge" style={{ borderColor: 'var(--warn)', color: 'var(--warn)' }}>heavy</span>}
+                    {cat === 'rag' && <span className="model-vision-badge" style={{ borderColor: 'var(--ok)', color: 'var(--ok)' }}>embed</span>}
+                  </div>
+                ))}
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
@@ -712,7 +1051,7 @@ function QuickDrawer({ open, onClose, selectedModel, settings }) {
 
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
 
-function Sidebar({ view, setView, activeId, setActiveId, conversations, onNew, onDelete, onConfig, status, statusDetail }) {
+function Sidebar({ view, setView, activeId, setActiveId, conversations, onNew, onDelete, onRename, onConfig, status, statusDetail }) {
   const [search, setSearch] = useState('');
 
   const filtered = useMemo(() => {
@@ -774,7 +1113,7 @@ function Sidebar({ view, setView, activeId, setActiveId, conversations, onNew, o
             {pinned.map(c => (
               <ConvItem key={c.id} conv={c} active={c.id === activeId}
                 onSelect={() => { setActiveId(c.id); setView('chat'); }}
-                onDelete={onDelete} />
+                onDelete={onDelete} onRename={onRename} />
             ))}
           </>
         )}
@@ -787,7 +1126,7 @@ function Sidebar({ view, setView, activeId, setActiveId, conversations, onNew, o
               {convs.map(c => (
                 <ConvItem key={c.id} conv={c} active={c.id === activeId}
                   onSelect={() => { setActiveId(c.id); setView('chat'); }}
-                  onDelete={onDelete} />
+                  onDelete={onDelete} onRename={onRename} />
               ))}
             </div>
           );
@@ -813,53 +1152,88 @@ function Sidebar({ view, setView, activeId, setActiveId, conversations, onNew, o
   );
 }
 
-function ConvItem({ conv, active, onSelect, onDelete }) {
+function ConvItem({ conv, active, onSelect, onDelete, onRename }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [renameVal, setRenameVal] = useState('');
+  const renameRef = useRef(null);
 
-  const handleDeleteClick = (e) => {
+  const startRename = e => {
     e.stopPropagation();
-    if (confirmDelete) {
-      onDelete?.(conv.id);
-    } else {
-      setConfirmDelete(true);
-    }
+    setRenameVal(convTitle(conv));
+    setRenaming(true);
+    setConfirmDelete(false);
+    setTimeout(() => renameRef.current?.select(), 0);
   };
 
-  const handleCancelDelete = (e) => {
+  const commitRename = () => {
+    const v = renameVal.trim();
+    setRenaming(false);
+    if (v && v !== convTitle(conv)) onRename?.(conv.id, v);
+  };
+
+  const handleDeleteClick = e => {
     e.stopPropagation();
-    setConfirmDelete(false);
+    if (confirmDelete) onDelete?.(conv.id);
+    else setConfirmDelete(true);
   };
 
   return (
     <div
-      className={`conv ${active ? 'active' : ''} ${confirmDelete ? 'confirm-del' : ''}`}
-      onClick={onSelect}
+      className={`conv ${active ? 'active' : ''} ${confirmDelete ? 'confirm-del' : ''} ${renaming ? 'renaming' : ''}`}
+      onClick={renaming ? undefined : onSelect}
       role="button"
       tabIndex={0}
-      onKeyDown={e => (e.key === 'Enter' || e.key === ' ') && onSelect()}
-      onMouseLeave={() => setConfirmDelete(false)}
+      onKeyDown={e => !renaming && (e.key === 'Enter' || e.key === ' ') && onSelect()}
+      onMouseLeave={() => { if (!renaming) setConfirmDelete(false); }}
     >
       <div className="conv-tick" />
-      <div className="conv-body">
-        <div className="conv-title">{convTitle(conv)}</div>
-        <div className="conv-meta">
-          <span>{formatTime(conv.updated_at)}</span>
-          {conv.assistant_name && <span className="conv-tag">{conv.assistant_name}</span>}
-        </div>
+      <div className="conv-body" style={{ minWidth: 0, flex: 1 }}>
+        {renaming ? (
+          <input
+            ref={renameRef}
+            className="conv-rename-input"
+            value={renameVal}
+            onChange={e => setRenameVal(e.target.value)}
+            onKeyDown={e => {
+              e.stopPropagation();
+              if (e.key === 'Enter') commitRename();
+              if (e.key === 'Escape') setRenaming(false);
+            }}
+            onBlur={commitRename}
+            onClick={e => e.stopPropagation()}
+          />
+        ) : (
+          <>
+            <div className="conv-title">{convTitle(conv)}</div>
+            <div className="conv-meta">
+              <span>{formatTime(conv.updated_at)}</span>
+              {conv.assistant_name && <span className="conv-tag">{conv.assistant_name}</span>}
+            </div>
+          </>
+        )}
       </div>
-      {confirmDelete ? (
-        <div className="conv-del-confirm" onClick={e => e.stopPropagation()}>
-          <button className="conv-del-yes" onClick={handleDeleteClick} title="Confirm delete">
-            <Icon name="check" size={10} />
-          </button>
-          <button className="conv-del-no" onClick={handleCancelDelete} title="Cancel">
-            <Icon name="x" size={10} />
-          </button>
-        </div>
-      ) : (
-        <button className="conv-del-btn" onClick={handleDeleteClick} title="Delete conversation">
-          <Icon name="trash" size={11} />
-        </button>
+
+      {!renaming && (
+        confirmDelete ? (
+          <div className="conv-del-confirm" onClick={e => e.stopPropagation()}>
+            <button className="conv-del-yes" onClick={handleDeleteClick} title="Confirm delete">
+              <Icon name="check" size={10} />
+            </button>
+            <button className="conv-del-no" onClick={e => { e.stopPropagation(); setConfirmDelete(false); }} title="Cancel">
+              <Icon name="x" size={10} />
+            </button>
+          </div>
+        ) : (
+          <div className="conv-actions" onClick={e => e.stopPropagation()}>
+            <button className="conv-action-btn" onClick={startRename} title="Rename">
+              <Icon name="edit" size={10} />
+            </button>
+            <button className="conv-del-btn" onClick={handleDeleteClick} title="Delete conversation">
+              <Icon name="trash" size={11} />
+            </button>
+          </div>
+        )
       )}
     </div>
   );
@@ -884,12 +1258,15 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [ragOn, setRagOn] = useState(true);
   const [attachedImages, setAttachedImages] = useState([]);
+  const [attachError, setAttachError] = useState('');
   const [pendingAssistant, setPendingAssistant] = useState(null);
+  const [initError, setInitError] = useState('');
   const [settings, setSettings] = useState(() => {
     try { return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem('hm.settings') || '{}') }; }
     catch { return DEFAULT_SETTINGS; }
   });
 
+  const isOnline = useNetworkStatus();
   const messagesEndRef = useRef(null);
 
   useEffect(() => {
@@ -897,31 +1274,36 @@ export default function App() {
     localStorage.setItem(THEME_KEY, theme);
   }, [theme]);
 
+  const runInit = useCallback(async (cancelled = { v: false }) => {
+    setInitError('');
+    setStatus('loading');
+    try {
+      const [ms, cs, st] = await Promise.all([
+        fetchModels(API_BASE),
+        fetchConversations(API_BASE),
+        fetchStatus(API_BASE),
+      ]);
+      if (cancelled.v) return;
+      const available = ms.models || [];
+      setModels(available);
+      setConversations(cs || []);
+      const ollama = st.ollama || 'error';
+      setStatus(ollama === 'ok' ? 'ok' : ollama === 'no_models' ? 'warn' : 'error');
+      setStatusDetail(ollama === 'ok' ? 'Backend and Ollama are ready' : 'Ollama unavailable');
+      if (available.length && !selectedModel) setSelectedModel(available[0].name);
+    } catch (e) {
+      if (cancelled.v) return;
+      setStatus('error');
+      setStatusDetail('Unable to reach backend');
+      setInitError(getErr(e, 'Unable to load app data'));
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const [ms, cs, st] = await Promise.all([
-          fetchModels(API_BASE),
-          fetchConversations(API_BASE),
-          fetchStatus(API_BASE),
-        ]);
-        if (cancelled) return;
-        const available = ms.models || [];
-        setModels(available);
-        setConversations(cs || []);
-        const ollama = st.ollama || 'error';
-        setStatus(ollama === 'ok' ? 'ok' : ollama === 'no_models' ? 'warn' : 'error');
-        setStatusDetail(ollama === 'ok' ? 'Backend and Ollama are ready' : 'Ollama unavailable');
-        if (available.length && !selectedModel) setSelectedModel(available[0].name);
-      } catch (e) {
-        if (cancelled) return;
-        setStatus('error'); setStatusDetail('Unable to reach backend');
-        setError(getErr(e, 'Unable to load app data'));
-      }
-    })();
-    return () => { cancelled = true; };
-  }, []);
+    const cancelled = { v: false };
+    runInit(cancelled);
+    return () => { cancelled.v = true; };
+  }, [runInit]);
 
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages.length]);
 
@@ -970,8 +1352,21 @@ export default function App() {
     }
   };
 
+  const handleRenameConv = async (id, title) => {
+    try {
+      await renameConversation(API_BASE, id, title);
+      setConversations(cs => cs.map(c => c.id === id ? { ...c, title } : c));
+    } catch (e) {
+      setError(getErr(e, 'Could not rename conversation'));
+    }
+  };
+
   const handleSend = async text => {
     if (!text || sending) return;
+    if (!selectedModel) {
+      setError('No model selected — pick one from the dropdown or run `ollama pull <model>`');
+      return;
+    }
     setSending(true);
     setError('');
     setSettingsOpen(false);
@@ -1037,17 +1432,34 @@ export default function App() {
           if (!line) continue;
           try {
             const p = JSON.parse(line.slice(6));
+            if (p.error) throw new Error(p.error);
             if (p.content) {
               content += p.content;
               setMessages(m => { const n = [...m]; const i = n.findIndex(x => x.id === 'streaming'); if (i !== -1) n[i] = { ...n[i], content }; return n; });
             }
-          } catch { continue; }
+          } catch (parseErr) {
+            if (parseErr.message && !parseErr.message.startsWith('JSON')) throw parseErr;
+            continue;
+          }
         }
       }
 
       const [cs, detail] = await Promise.all([fetchConversations(API_BASE), fetchConversation(API_BASE, convId)]);
       setConversations(cs || []);
-      setMessages(detail.messages || []);
+      // Merge server messages with local image data URLs (server never stores images)
+      const serverMsgs = detail.messages || [];
+      setMessages(current => {
+        const localImgMap = new Map(
+          current
+            .filter(m => m.role === 'user' && m.images?.length > 0)
+            .map(m => [m.content, m.images])
+        );
+        return serverMsgs.map(m =>
+          m.role === 'user' && localImgMap.has(m.content)
+            ? { ...m, images: localImgMap.get(m.content) }
+            : m
+        );
+      });
       setActiveConvId(convId);
     } catch (e) {
       setError(getErr(e, 'Unable to send message'));
@@ -1071,6 +1483,7 @@ export default function App() {
       : 'New conversation';
 
   return (
+    <ErrorBoundary>
     <div className={`app ${collapsed ? 'no-sidebar' : ''}`} onClick={() => setSettingsOpen(false)}>
       <Sidebar
         view={view}
@@ -1080,12 +1493,21 @@ export default function App() {
         conversations={conversations}
         onNew={newChat}
         onDelete={handleDeleteConv}
+        onRename={handleRenameConv}
         onConfig={e => { e.stopPropagation(); setSettingsOpen(s => !s); }}
         status={status}
         statusDetail={statusDetail}
       />
 
       <main className="main">
+        {!isOnline && <OfflineBanner />}
+        {initError && (
+          <ErrorBanner
+            message={initError}
+            onRetry={() => runInit({ v: false })}
+            onDismiss={() => setInitError('')}
+          />
+        )}
         <header className="top">
           <div className="top-left">
             <button className="icon-btn framed" onClick={() => setCollapsed(c => !c)} title="Toggle sidebar">
@@ -1101,7 +1523,10 @@ export default function App() {
             {view === 'chat' && (
               <ModelSelect value={selectedModel} models={models} onChange={m => {
                 setSelectedModel(m);
-                if (!isMultimodal(m)) setAttachedImages([]);
+                if (!isMultimodal(m) && attachedImages.length > 0) {
+                  setAttachedImages([]);
+                  setAttachError(`${m} doesn't support vision — attached images were removed`);
+                }
               }} />
             )}
             <button className="icon-btn framed" title="Quick chat (⌘K)" onClick={() => setDrawerOpen(true)}>
@@ -1128,38 +1553,40 @@ export default function App() {
 
         {view === 'assistants' ? (
           <AssistantsPage
+            models={models}
             onOpenChat={a => {
               setActiveConvId(null);
               setMessages([]);
               setError('');
               setAttachedImages([]);
               setPendingAssistant(a);
+              if (a.preferred_model) setSelectedModel(a.preferred_model);
               setView('chat');
             }}
             onQuickChat={a => {
               setPendingAssistant(a);
+              if (a.preferred_model) setSelectedModel(a.preferred_model);
               setDrawerOpen(true);
             }}
           />
         ) : (
           <div className="chat-area">
             <div className="messages">
-              {error && (
-                <div className="error-banner" style={{ maxWidth: 820, margin: '12px auto 0', padding: '0 24px' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '10px 14px', background: 'color-mix(in srgb, var(--err) 8%, transparent)', border: '1.5px solid var(--err)', fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: 'var(--err)' }}>
-                    <Icon name="warning" size={14} />
-                    {error}
-                  </div>
-                </div>
-              )}
+              <ErrorBanner message={error} onDismiss={() => setError('')} />
 
               {messages.length === 0 ? (
-                <EmptyState
-                  onPrompt={handleSend}
-                  status={status}
-                  modelName={selectedModel}
-                  convCount={conversations.length}
-                />
+                status === 'error' ? (
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 1 }}>
+                    <OllamaOfflineNotice onRetry={() => runInit({ v: false })} />
+                  </div>
+                ) : (
+                  <EmptyState
+                    onPrompt={handleSend}
+                    status={status}
+                    modelName={selectedModel}
+                    convCount={conversations.length}
+                  />
+                )
               ) : (
                 <div className="msg-wrap">
                   {messages.map((m, idx) =>
@@ -1181,16 +1608,19 @@ export default function App() {
               )}
             </div>
 
+            <NoModelBanner models={models} />
             <Composer
               onSend={handleSend}
               ragOn={ragOn}
               setRagOn={setRagOn}
               asstName={activeConv?.assistant_name || pendingAssistant?.name}
-              disabled={sending}
+              disabled={sending || status === 'error'}
               attachedImages={attachedImages}
               onAttach={imgs => setAttachedImages(c => [...c, ...imgs])}
               onRemoveImage={id => setAttachedImages(c => c.filter(i => i.id !== id))}
               canAttach={isMultimodal(selectedModel)}
+              attachError={attachError}
+              onClearAttachError={() => setAttachError('')}
             />
           </div>
         )}
@@ -1198,5 +1628,6 @@ export default function App() {
 
       <QuickDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} selectedModel={selectedModel} settings={settings} />
     </div>
+    </ErrorBoundary>
   );
 }

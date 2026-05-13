@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { TextInput } from '@carbon/react';
-import { createAssistant, deleteAssistant, fetchAssistants, fetchIndexStatus, triggerIndex, updateAssistant } from './api';
+import { addPathToAssistant, createAssistant, deleteAssistant, fetchAssistants, fetchIndexStatus, removePathFromAssistant, triggerIndex, updateAssistant } from './api';
 
 const API_BASE = '/api';
 const POLL_INTERVAL = 2500;
@@ -40,7 +40,7 @@ function StatusBadge({ status }) {
   return <span className="asst-badge pending"><span className="dot-mini"/> pending</span>;
 }
 
-export default function AssistantsPage({ onOpenChat, onQuickChat }) {
+export default function AssistantsPage({ onOpenChat, onQuickChat, models = [] }) {
   const [assistants, setAssistants] = useState([]);
   const [over, setOver] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -54,6 +54,9 @@ export default function AssistantsPage({ onOpenChat, onQuickChat }) {
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({ description: '', codebase_path: '' });
   const [editSaving, setEditSaving] = useState(false);
+  const [pageError, setPageError] = useState('');
+  const [addingPathId, setAddingPathId] = useState(null);
+  const [newPathVal, setNewPathVal] = useState('');
 
   const pollingRef = useRef(new Set());
   const pollTimerRef = useRef(null);
@@ -62,9 +65,15 @@ export default function AssistantsPage({ onOpenChat, onQuickChat }) {
   const folderInputRef = useRef(null);
 
   const refresh = async () => {
-    const data = await fetchAssistants(API_BASE);
-    setAssistants(data || []);
-    return data || [];
+    try {
+      const data = await fetchAssistants(API_BASE);
+      setAssistants(data || []);
+      setPageError('');
+      return data || [];
+    } catch (err) {
+      setPageError(err.message || 'Failed to load assistants');
+      return [];
+    }
   };
 
   const startPolling = () => {
@@ -184,6 +193,41 @@ export default function AssistantsPage({ onOpenChat, onQuickChat }) {
     }
   };
 
+  const handleAddPath = async (id) => {
+    const path = newPathVal.trim();
+    if (!path) return;
+    setNewPathVal('');
+    setAddingPathId(null);
+    try {
+      const result = await addPathToAssistant(API_BASE, id, path);
+      setAssistants((prev) => prev.map((a) => a.id === id ? { ...a, extra_paths: result.extra_paths, index_status: 'indexing' } : a));
+      pollingRef.current.add(id);
+      startPolling();
+    } catch (err) {
+      setCardErrors((prev) => ({ ...prev, [id]: `Add path failed: ${err.message}` }));
+    }
+  };
+
+  const handleRemovePath = async (id, path) => {
+    try {
+      const result = await removePathFromAssistant(API_BASE, id, path);
+      setAssistants((prev) => prev.map((a) => a.id === id ? { ...a, extra_paths: result.extra_paths, index_status: 'indexing' } : a));
+      pollingRef.current.add(id);
+      startPolling();
+    } catch (err) {
+      setCardErrors((prev) => ({ ...prev, [id]: `Remove path failed: ${err.message}` }));
+    }
+  };
+
+  const handleSetPreferredModel = async (id, model) => {
+    try {
+      await updateAssistant(API_BASE, id, { preferred_model: model });
+      setAssistants((prev) => prev.map((a) => (a.id === id ? { ...a, preferred_model: model } : a)));
+    } catch (err) {
+      setCardErrors((prev) => ({ ...prev, [id]: `Could not save model: ${err.message}` }));
+    }
+  };
+
   useEffect(() => {
     const handler = (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'i') {
@@ -206,9 +250,24 @@ export default function AssistantsPage({ onOpenChat, onQuickChat }) {
     const files = Array.from(e.target.files || []);
     e.target.value = '';
     if (!files.length) return;
-    const rel = files[0].webkitRelativePath || '';
-    const folderName = rel.split('/')[0] || files[0].name || 'folder';
-    openFormWithFolder(folderName);
+    const firstFile = files[0];
+    const rel = firstFile.webkitRelativePath || '';
+    const folderName = rel.split('/')[0] || firstFile.name || 'folder';
+
+    // Derive absolute path: file.path (Electron/desktop) gives the full path of
+    // the first file; strip the relative portion to get the folder's absolute path.
+    let pathHint = `~/${folderName}`;
+    if (firstFile.path) {
+      const absFile = firstFile.path.replace(/\\/g, '/');
+      const relPart = rel.replace(/\\/g, '/');
+      if (relPart && absFile.endsWith(relPart)) {
+        pathHint = absFile.slice(0, absFile.length - relPart.length).replace(/\/$/, '');
+      } else {
+        pathHint = absFile.replace(/\/[^/]+$/, '');
+      }
+    }
+
+    openFormWithFolder(folderName, pathHint);
   };
 
   const onDragEnter = (e) => {
@@ -239,6 +298,20 @@ export default function AssistantsPage({ onOpenChat, onQuickChat }) {
   return (
     <div className="asst-page">
       <div className="asst-page-inner">
+
+        {/* Page-level error */}
+        {pageError && (
+          <div className="asst-page-error">
+            <Icon name="warning" size={14} />
+            <span>{pageError}</span>
+            <button onClick={refresh} title="Retry">
+              <Icon name="refresh" size={13} />
+            </button>
+            <button onClick={() => setPageError('')} title="Dismiss">
+              <Icon name="x" size={13} />
+            </button>
+          </div>
+        )}
 
         {/* Hero */}
         <div className="asst-hero">
@@ -418,6 +491,38 @@ export default function AssistantsPage({ onOpenChat, onQuickChat }) {
                   </div>
                 )}
 
+                {/* Extra paths */}
+                {(assistant.extra_paths?.length > 0 || addingPathId === assistant.id) && (
+                  <div className="asst-extra-paths">
+                    {assistant.extra_paths?.map(p => (
+                      <div key={p} className="asst-extra-path-row">
+                        <Icon name="folder" size={10}/>
+                        <span className="asst-extra-path-text">{p}</span>
+                        <button className="act-btn danger" onClick={() => handleRemovePath(assistant.id, p)} title="Remove path">
+                          <Icon name="x" size={10}/>
+                        </button>
+                      </div>
+                    ))}
+                    {addingPathId === assistant.id && (
+                      <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
+                        <input
+                          className="asst-add-path-input"
+                          value={newPathVal}
+                          onChange={e => setNewPathVal(e.target.value)}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') handleAddPath(assistant.id);
+                            if (e.key === 'Escape') { setAddingPathId(null); setNewPathVal(''); }
+                          }}
+                          placeholder="/path/to/extra/codebase"
+                          autoFocus
+                        />
+                        <button className="act-btn primary" onClick={() => handleAddPath(assistant.id)}>Add</button>
+                        <button className="act-btn" onClick={() => { setAddingPathId(null); setNewPathVal(''); }}>✕</button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* Stats */}
                 {assistant.index_status === 'ready' && (
                   <div className="asst-stats">
@@ -443,6 +548,23 @@ export default function AssistantsPage({ onOpenChat, onQuickChat }) {
                   </>
                 )}
 
+                {/* Model preference */}
+                {models.length > 0 && (
+                  <div className="asst-model-row">
+                    <span className="asst-model-label">Model</span>
+                    <select
+                      className="asst-model-select"
+                      value={assistant.preferred_model || ''}
+                      onChange={e => handleSetPreferredModel(assistant.id, e.target.value)}
+                    >
+                      <option value="">— use current —</option>
+                      {models.filter(m => !/embed|nomic|mxbai|bge|e5|all-minilm/i.test(m.name)).map(m => (
+                        <option key={m.name} value={m.name}>{m.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
                 {/* Footer */}
                 <div className="asst-card-foot">
                   <div className="asst-actions">
@@ -466,6 +588,13 @@ export default function AssistantsPage({ onOpenChat, onQuickChat }) {
                     )}
                     <button className="act-btn" onClick={() => handleEditStart(assistant)} title="Edit">
                       <Icon name="settings" size={11}/>
+                    </button>
+                    <button
+                      className="act-btn"
+                      onClick={() => { setAddingPathId(assistant.id); setNewPathVal(''); }}
+                      title="Add extra path to index"
+                    >
+                      <Icon name="plus" size={11}/>
                     </button>
 
                     {deleteConfirmId === assistant.id ? (

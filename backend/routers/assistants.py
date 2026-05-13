@@ -54,6 +54,8 @@ _index_tasks:  dict[str, asyncio.Task] = {}
 def _serialize(doc: dict) -> dict:
     doc = dict(doc)
     doc["id"] = str(doc.pop("_id"))
+    doc.setdefault("extra_paths", [])
+    doc.setdefault("preferred_model", None)
     return doc
 
 
@@ -130,6 +132,8 @@ async def update_assistant(assistant_id: str, req: schemas.AssistantUpdateReques
         updates["description"] = req.description
     if req.codebase_path is not None:
         updates["codebase_path"] = req.codebase_path
+    if req.preferred_model is not None:
+        updates["preferred_model"] = req.preferred_model
 
     database.assistants_collection.update_one({"_id": assistant_id}, {"$set": updates})
     doc = database.assistants_collection.find_one({"_id": assistant_id})
@@ -162,6 +166,58 @@ async def delete_assistant(assistant_id: str):
     return {"deleted": assistant_id}
 
 
+@router.post("/{assistant_id}/add-path")
+async def add_path(assistant_id: str, path: str):
+    """Append an additional directory to index and trigger a re-index."""
+    from pathlib import Path as _Path
+    doc = database.assistants_collection.find_one({"_id": assistant_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Assistant not found")
+    resolved = str(_Path(path).expanduser().resolve())
+    if not _Path(resolved).exists():
+        raise HTTPException(status_code=400, detail=f"Path does not exist: {path}")
+
+    extra_paths = doc.get("extra_paths", [])
+    if resolved not in extra_paths:
+        extra_paths = [*extra_paths, resolved]
+        database.assistants_collection.update_one(
+            {"_id": assistant_id},
+            {"$set": {"extra_paths": extra_paths, "updated_at": datetime.now(timezone.utc)}},
+        )
+
+    await _cancel_task(assistant_id)
+    _index_status[assistant_id] = {"status": "indexing", "indexed_files": 0, "total_files": 0, "total_chunks": 0, "percent": 0}
+    database.assistants_collection.update_one(
+        {"_id": assistant_id},
+        {"$set": {"index_status": "indexing", "updated_at": datetime.now(timezone.utc)}},
+    )
+    task = asyncio.create_task(_run_indexing(assistant_id, doc["codebase_path"], force_full=False, extra_paths=extra_paths))
+    _index_tasks[assistant_id] = task
+    return {"status": "indexing", "extra_paths": extra_paths}
+
+
+@router.delete("/{assistant_id}/add-path")
+async def remove_path(assistant_id: str, path: str):
+    """Remove an extra path from the assistant and trigger a full re-index."""
+    doc = database.assistants_collection.find_one({"_id": assistant_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Assistant not found")
+    extra_paths = [p for p in doc.get("extra_paths", []) if p != path]
+    database.assistants_collection.update_one(
+        {"_id": assistant_id},
+        {"$set": {"extra_paths": extra_paths, "updated_at": datetime.now(timezone.utc)}},
+    )
+    await _cancel_task(assistant_id)
+    _index_status[assistant_id] = {"status": "indexing", "indexed_files": 0, "total_files": 0, "total_chunks": 0, "percent": 0}
+    database.assistants_collection.update_one(
+        {"_id": assistant_id},
+        {"$set": {"index_status": "indexing", "updated_at": datetime.now(timezone.utc)}},
+    )
+    task = asyncio.create_task(_run_indexing(assistant_id, doc["codebase_path"], force_full=True, extra_paths=extra_paths))
+    _index_tasks[assistant_id] = task
+    return {"status": "indexing", "extra_paths": extra_paths}
+
+
 @router.post("/{assistant_id}/index")
 async def trigger_index(assistant_id: str, force: bool = False):
     """
@@ -190,7 +246,8 @@ async def trigger_index(assistant_id: str, force: bool = False):
         {"$set": {"index_status": "indexing", "updated_at": datetime.now(timezone.utc)}},
     )
 
-    task = asyncio.create_task(_run_indexing(assistant_id, doc["codebase_path"], force_full=force))
+    extra_paths = doc.get("extra_paths", [])
+    task = asyncio.create_task(_run_indexing(assistant_id, doc["codebase_path"], force_full=force, extra_paths=extra_paths))
     _index_tasks[assistant_id] = task
 
     return {"status": "indexing"}
@@ -219,7 +276,7 @@ async def get_index_status(assistant_id: str):
 # Indexing task
 # ---------------------------------------------------------------------------
 
-async def _run_indexing(assistant_id: str, codebase_path: str, force_full: bool = False) -> None:
+async def _run_indexing(assistant_id: str, codebase_path: str, force_full: bool = False, extra_paths=None) -> None:
     """
     Runs as an asyncio Task so it can be cancelled at any await point.
 
@@ -237,7 +294,7 @@ async def _run_indexing(assistant_id: str, codebase_path: str, force_full: bool 
             }
 
         result = await rag_service.index_codebase(
-            assistant_id, codebase_path, on_progress=on_progress, force_full=force_full
+            assistant_id, codebase_path, extra_paths=extra_paths, on_progress=on_progress, force_full=force_full
         )
 
         now = datetime.now(timezone.utc)
