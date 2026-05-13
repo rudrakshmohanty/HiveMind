@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo2.png" alt="HiveMind" />
+  <img src="https://github.com/user-attachments/assets/953ec1d7-253a-4865-a60f-4e2d6c921715" alt="HiveMind" />
 </p>
 
 <h1 align="center">HiveMind</h1>
@@ -28,11 +28,11 @@
 
 | Chat                                    | Assistants                                          |
 | --------------------------------------- | --------------------------------------------------- |
-| ![Chat view](assets/screenshots/chat.png) | ![Assistants page](assets/screenshots/assistants.png) |
+| ![Chat view light](https://github.com/user-attachments/assets/910d7dd1-4358-4108-b730-3d69a28da738)![Chat view dark](https://github.com/user-attachments/assets/db7bd8aa-90d8-414e-a27e-640176fadf85) | ![Assistants page light](https://github.com/user-attachments/assets/e675d2ae-5c6a-4f79-baeb-8454fb33482d) ![Assistants page dark](https://github.com/user-attachments/assets/d33e598e-eed4-455d-9c8d-70cb5a91149d) |
 
 | Code rendering                            | Model selector                               |
 | ----------------------------------------- | -------------------------------------------- |
-| ![Code blocks](assets/screenshots/code.png) | ![Model picker](assets/screenshots/models.png) |
+| ![Code blocks light](https://github.com/user-attachments/assets/4a65f3b1-7a1d-475a-83b4-a03dae121c80) ![Code blocks dark](https://github.com/user-attachments/assets/ea6ab6c2-88e9-4d92-ac3f-7451c1c6a877)| ![Model picker light](https://github.com/user-attachments/assets/75207bcf-2228-43de-84dd-240be7d75d88) ![Model picker dark](https://github.com/user-attachments/assets/1d77a652-6a92-4211-9ae4-6f20b22cbbc4) |
 
 ---
 
