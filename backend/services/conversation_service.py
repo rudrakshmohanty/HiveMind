@@ -21,6 +21,7 @@ def _serialize_conversation(doc: dict) -> dict:
         "archived": doc.get("archived", False),
         "assistant_id": doc.get("assistant_id"),
         "assistant_name": doc.get("assistant_name"),
+        "user_id": doc.get("user_id"),
     }
 
 
@@ -39,7 +40,8 @@ def _serialize_message(doc: dict) -> dict:
 
 def create_conversation(db, title: str = "New Chat", model: str = "mistral",
                         temperature: float = 0.7, top_p: float = 0.9, max_tokens: int = 512,
-                        assistant_id: Optional[str] = None, assistant_name: Optional[str] = None) -> dict:
+                        assistant_id: Optional[str] = None, assistant_name: Optional[str] = None,
+                        user_id: Optional[str] = None) -> dict:
     conv_id = str(uuid.uuid4())
     now = datetime.utcnow()
     conv_doc = {
@@ -54,6 +56,7 @@ def create_conversation(db, title: str = "New Chat", model: str = "mistral",
         "archived": False,
         "assistant_id": assistant_id,
         "assistant_name": assistant_name,
+        "user_id": user_id,
     }
     conversations_collection.insert_one(conv_doc)
     return _serialize_conversation(conv_doc)
@@ -100,8 +103,9 @@ def get_conversation(db, conv_id: str) -> Optional[dict]:
     return _serialize_conversation(conv) if conv else None
 
 
-def list_conversations(db, limit: int = 50) -> list[dict]:
-    conversations = conversations_collection.find().sort("updated_at", -1).limit(limit)
+def list_conversations(db, limit: int = 50, user_id: Optional[str] = None) -> list[dict]:
+    query = {} if user_id is None else {"user_id": user_id}
+    conversations = conversations_collection.find(query).sort("updated_at", -1).limit(limit)
     result = []
     for conv in conversations:
         conv_data = _serialize_conversation(conv)

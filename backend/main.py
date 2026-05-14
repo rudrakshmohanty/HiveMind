@@ -16,12 +16,12 @@ from fastapi.responses import JSONResponse
 
 try:
     from .database import ensure_indexes
-    from .routers import assistants, chat, conversations, health
+    from .routers import assistants, auth, admin, chat, conversations, health
 except ImportError:
     from database import ensure_indexes
-    from routers import assistants, chat, conversations, health
+    from routers import assistants, auth, admin, chat, conversations, health
 
-app = FastAPI(title="HiveMind", version="0.1.0")
+app = FastAPI(title="HiveMind", version="0.1.0", redirect_slashes=False)
 
 
 @app.exception_handler(RequestValidationError)
@@ -45,9 +45,11 @@ app.add_middleware(
 )
 
 app.include_router(health.router, prefix="/api")
+app.include_router(auth.router, prefix="/api/auth")
 app.include_router(chat.router, prefix="/api")
 app.include_router(conversations.router, prefix="/api/conversations")
 app.include_router(assistants.router, prefix="/api/assistants")
+app.include_router(admin.router, prefix="/api/admin")
 
 
 @app.on_event("startup")

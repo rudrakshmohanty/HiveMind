@@ -223,24 +223,87 @@ Open **[http://localhost:5173](http://localhost:5173)** — HiveMind is ready.
 
 ---
 
-## Docker (one-command setup)
+## Docker (recommended)
+
+Docker is the easiest way to run HiveMind — no need to install Python, MongoDB, or Node.js manually. Everything runs in containers.
+
+### What you need
+
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (includes Docker Compose)
+
+### 1 · Clone the repo
+
+```bash
+git clone https://github.com/rudrakshmohanty/hivemind.git
+cd hivemind
+```
+
+### 2 · Start everything
 
 ```bash
 docker compose up --build
 ```
 
-| Service     | URL                        |
-| ----------- | -------------------------- |
-| HiveMind    | `http://localhost:3000`  |
-| Backend API | `http://localhost:8000`  |
-| Ollama      | `http://localhost:11434` |
+This builds and starts all four services: MongoDB, Ollama, the backend API, and the frontend. The first build takes a few minutes — subsequent starts are fast.
 
-After starting, pull models inside the container:
+### 3 · Pull AI models
+
+Open a new terminal while the stack is running:
 
 ```bash
-docker exec -it ollama-service ollama pull mistral
-docker exec -it ollama-service ollama pull nomic-embed-text
+# Chat model (swap for any model you like)
+docker exec -it hivemind-ollama ollama pull mistral
+
+# Embedding model — required for Codespace Assistants
+docker exec -it hivemind-ollama ollama pull nomic-embed-text
 ```
+
+### 4 · Open HiveMind
+
+| Device | URL |
+|--------|-----|
+| Same machine | `http://localhost:3000` |
+| Other device on same WiFi | `http://<your-ip>:3000` |
+
+To find your local IP (for accessing from another device):
+
+```bash
+# macOS
+ipconfig getifaddr en0
+
+# Linux
+hostname -I | awk '{print $1}'
+
+# Windows (PowerShell)
+(Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias Wi-Fi).IPAddress
+```
+
+Then open `http://<your-ip>:3000` on any phone, tablet, or laptop on the same WiFi — no extra setup needed.
+
+### Useful commands
+
+```bash
+# Start in the background
+docker compose up -d --build
+
+# View logs
+docker compose logs -f
+
+# Stop everything
+docker compose down
+
+# Stop and delete all data (full reset)
+docker compose down -v
+```
+
+### Services
+
+| Service | Port | Description |
+|---------|------|-------------|
+| HiveMind | `3000` | Main app (nginx) |
+| Backend API | `8000` | FastAPI — also at `/api/` via nginx |
+| Ollama | `11434` | LLM runtime |
+| MongoDB | `27017` | Chat + assistant storage |
 
 ---
 
@@ -322,6 +385,33 @@ hivemind/
 
 ---
 
+## Technical decisions
+
+These are the deliberate design choices made during development and why.
+
+**ChromaDB over FAISS or Qdrant**
+ChromaDB persists to disk automatically as a local file store — no separate server process needed. FAISS is purely in-memory and requires manual serialization. Qdrant needs a running server. For a self-hosted, single-user deployment ChromaDB offers the best tradeoff of simplicity and persistence. Each assistant gets its own isolated collection (`assistant_{id}`) so there is zero cross-contamination between indexed codebases.
+
+**Line-based overlapping chunks over sentence/token chunking**
+Source code doesn't split cleanly at sentence boundaries. A 60-line window with 10-line overlap means functions that straddle a boundary still appear complete in at least one chunk. This was a deliberate choice over character or token-based chunking which can cut mid-statement and break context for the LLM.
+
+**Incremental indexing with dual mtime + MD5 check**
+Re-indexing a large codebase from scratch on every change is expensive. The indexer stores the file's `mtime` and MD5 hash alongside each chunk in ChromaDB. On re-index it first checks `mtime` (cheap stat call, no file read) — only if mtime changed does it read the file and compare MD5. If the hash matches it skips the file entirely. For a 1000-file project where 50 files changed this means ~95% fewer embedding calls.
+
+**Batch embedding over one-call-per-chunk**
+The first version of the indexer called `/api/embeddings` once per chunk — for a file with 20 chunks that was 20 HTTP round-trips. Switching to `/api/embed` (Ollama ≥ 0.1.31) with `EMBED_BATCH_SIZE=32` collapses those into a single request. Combined with `asyncio.Semaphore(INDEX_CONCURRENCY=4)` to parallelize across files, indexing speed improved significantly on large codebases.
+
+**Asyncio write lock on ChromaDB**
+ChromaDB uses SQLite under the hood. Concurrent `asyncio.to_thread` writes from multiple files being indexed simultaneously trigger "database is locked" errors. A single `asyncio.Lock()` serializes writes while keeping embedding (the slow part) fully concurrent — reads and embeddings happen in parallel, only the final `collection.add` call is serialized.
+
+**SSE (Server-Sent Events) over WebSockets for streaming**
+Streaming tokens from Ollama to the browser is a unidirectional push — the server writes, the client reads. SSE is purpose-built for this: it's HTTP, works through proxies and nginx without special configuration, requires no handshake, and reconnects automatically. WebSockets add bidirectional overhead that this use case doesn't need.
+
+**MongoDB over SQLite for conversation storage**
+Conversation messages are stored as embedded arrays inside a conversation document. MongoDB's document model maps naturally to this structure — a conversation is a single document with a `messages` array rather than a join across two tables. Retrieval is a single `find_one` with no joins. SQLite would work but requires a schema migration story; MongoDB schema-flexibility is a better fit for a project that iterated quickly on message structure.
+
+---
+
 ## Troubleshooting
 
 **AI doesn't respond**
@@ -338,6 +428,19 @@ The backend needs to be running (Step 5). Restart it after rebooting.
 
 ---
 
+## Roadmap
+
+Planned improvements and known limitations:
+
+- [ ] **Response quality feedback** — thumbs up/down on AI replies stored for evaluation
+- [ ] **Conversation export** — download chat history as Markdown or JSON
+- [ ] **Chunking strategy comparison** — benchmark fixed-size vs sentence-boundary chunking on retrieval quality
+- [ ] **Multi-user auth** — JWT-based login so multiple people can share a deployment without seeing each other's conversations
+- [ ] **System prompt per assistant** — let users define a custom persona or constraints per codespace assistant
+- [ ] **Mobile PWA** — installable on Android/iOS as a home screen app
+
+---
+
 ## Contributing
 
 1. Fork the repository
@@ -350,9 +453,9 @@ Bug reports and feature ideas are welcome as issues.
 
 ---
 
-## Acknowledgements
+## Author
 
-Built by [Rudraksh Mohanty](https://github.com/rudrakshmohanty) with [Claude](https://claude.ai) (Anthropic) - architecture and RAG pipeline design.
+Built by [Rudraksh Mohanty](https://github.com/rudrakshmohanty) — CSE-AI undergraduate with a focus on practical AI systems.
 
 ---
 

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { TextInput } from '@carbon/react';
-import { addPathToAssistant, createAssistant, deleteAssistant, fetchAssistants, fetchIndexStatus, removePathFromAssistant, triggerIndex, updateAssistant } from './api';
+import { addPathToAssistant, createAssistant, deleteAssistant, fetchAssistants, fetchIndexStatus, fetchIndexedFiles, removePathFromAssistant, triggerIndex, updateAssistant } from './api';
 
 const API_BASE = '/api';
 const POLL_INTERVAL = 2500;
@@ -22,6 +22,8 @@ function Icon({ name, size = 16, stroke = 1.5 }) {
     chat:     <path d="M21 12a8 8 0 0 1-11.7 7.1L4 21l1.9-5.3A8 8 0 1 1 21 12z"/>,
     bot:      <><rect x="4" y="7" width="16" height="13" rx="2"/><path d="M12 3v4M8 14h.01M16 14h.01M9 18h6"/></>,
     code:     <path d="m16 18 6-6-6-6M8 6l-6 6 6 6"/>,
+    file:     <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></>,
+    chevron:  <path d="m9 18 6-6-6-6"/>,
   };
   return <svg {...c}>{paths[name] ?? null}</svg>;
 }
@@ -111,6 +113,8 @@ export default function AssistantsPage({ onOpenChat, onQuickChat, models = [] })
   const [pageError, setPageError] = useState('');
   const [addingPathId, setAddingPathId] = useState(null);
   const [newPathVal, setNewPathVal] = useState('');
+  const [filesOpenId, setFilesOpenId] = useState(null);
+  const [filesData, setFilesData] = useState({});   // { [id]: { loading, files, error } }
 
   const pollingRef = useRef(new Set());
   const pollTimerRef = useRef(null);
@@ -270,6 +274,19 @@ export default function AssistantsPage({ onOpenChat, onQuickChat, models = [] })
       startPolling();
     } catch (err) {
       setCardErrors((prev) => ({ ...prev, [id]: `Remove path failed: ${err.message}` }));
+    }
+  };
+
+  const handleToggleFiles = async (id) => {
+    if (filesOpenId === id) { setFilesOpenId(null); return; }
+    setFilesOpenId(id);
+    if (filesData[id]?.files) return;  // already loaded
+    setFilesData(prev => ({ ...prev, [id]: { loading: true, files: null, error: null } }));
+    try {
+      const result = await fetchIndexedFiles(API_BASE, id);
+      setFilesData(prev => ({ ...prev, [id]: { loading: false, files: result.files || [], error: null } }));
+    } catch (err) {
+      setFilesData(prev => ({ ...prev, [id]: { loading: false, files: null, error: err.message } }));
     }
   };
 
@@ -600,6 +617,41 @@ export default function AssistantsPage({ onOpenChat, onQuickChat, models = [] })
                       <div className="asst-progress-fill" style={{ width: `${assistant.index_percent ?? 0}%` }}/>
                     </div>
                   </>
+                )}
+
+                {/* Indexed file list */}
+                {assistant.index_status === 'ready' && (
+                  <div className="asst-files-section">
+                    <button
+                      className="asst-files-toggle"
+                      onClick={() => handleToggleFiles(assistant.id)}
+                    >
+                      <Icon name="file" size={11}/>
+                      <span>Indexed files ({(assistant.indexed_files || 0).toLocaleString()})</span>
+                      <span className={`asst-files-chevron ${filesOpenId === assistant.id ? 'open' : ''}`}>
+                        <Icon name="chevron" size={11}/>
+                      </span>
+                    </button>
+                    {filesOpenId === assistant.id && (
+                      <div className="asst-files-panel">
+                        {filesData[assistant.id]?.loading && (
+                          <div className="asst-files-status">Loading…</div>
+                        )}
+                        {filesData[assistant.id]?.error && (
+                          <div className="asst-files-status error">{filesData[assistant.id].error}</div>
+                        )}
+                        {filesData[assistant.id]?.files?.length === 0 && (
+                          <div className="asst-files-status">No files indexed yet.</div>
+                        )}
+                        {filesData[assistant.id]?.files?.map(f => (
+                          <div key={f} className="asst-file-item">
+                            <Icon name="file" size={10}/>
+                            <span className="asst-file-path">{f}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 )}
 
                 {/* Model preference */}

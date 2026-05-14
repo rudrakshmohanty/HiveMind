@@ -1,12 +1,25 @@
-FROM node:20-slim
+# Stage 1 — build
+FROM node:20-slim AS builder
 
 WORKDIR /app
 
-COPY package*.json .
+# Copy root assets (vite.config publicDir: '../assets' resolves to /app/assets)
+COPY assets/ ./assets/
+
+# Install deps first for better layer caching
+WORKDIR /app/frontend
+COPY frontend/package.json ./
 RUN npm install
 
-COPY . .
+# Copy source and build
+COPY frontend/ ./
+RUN npm run build
 
-EXPOSE 3000
+# Stage 2 — serve with nginx
+FROM nginx:alpine
 
-CMD ["npm", "run", "dev"]
+COPY --from=builder /app/frontend/dist /usr/share/nginx/html
+COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
+
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]

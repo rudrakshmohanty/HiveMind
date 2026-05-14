@@ -3,8 +3,6 @@ services:
   mongo:
     image: mongo:7
     container_name: hivemind-mongo
-    ports:
-      - "27017:27017"
     volumes:
       - mongo_data:/data/db
     restart: unless-stopped
@@ -26,7 +24,7 @@ services:
       - OLLAMA_HOST=0.0.0.0:11434
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434"]
+      test: ["CMD", "ollama", "list"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -62,16 +60,14 @@ services:
 
   frontend:
     build:
-      context: ./frontend
-      dockerfile: Dockerfile
+      context: .                        # root — needed for ../assets in vite.config
+      dockerfile: frontend/Dockerfile
     container_name: hivemind-frontend
     ports:
-      - "3000:3000"
+      - "5173:80"                       # nginx serves on 80 inside container
     depends_on:
       backend:
         condition: service_healthy
-    environment:
-      - VITE_BACKEND_URL=http://hivemind-backend:8000
     restart: unless-stopped
 
 volumes:

@@ -36,13 +36,18 @@ WHY CHUNK?
 
 import asyncio
 import hashlib
+import logging
 import os
+import re
+import time
 import uuid
 from pathlib import Path
 from typing import Optional
 
 import chromadb
 import httpx
+
+logger = logging.getLogger(__name__)
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
@@ -53,13 +58,18 @@ EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
 # ChromaDB stores its data in this local folder (no server needed).
 CHROMA_PATH = os.getenv("CHROMA_PATH", "./chroma_db")
 
-# How many files to embed concurrently. Higher = faster, but uses more RAM
-# and may overwhelm Ollama on low-end hardware. Tune with INDEX_CONCURRENCY env var.
-INDEX_CONCURRENCY = int(os.getenv("INDEX_CONCURRENCY", "4"))
+# How many files to embed concurrently.
+INDEX_CONCURRENCY = int(os.getenv("INDEX_CONCURRENCY", "6"))
 
-# Max texts sent in a single /api/embed call. Larger batches reduce HTTP
-# round-trips but use more memory per request.
+# Max texts sent in a single /api/embed call.
 EMBED_BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "32"))
+
+# How many times to retry a failed embedding request before giving up.
+EMBED_RETRIES = int(os.getenv("EMBED_RETRIES", "3"))
+
+# Cosine distance threshold for retrieval (0 = identical, 2 = opposite).
+# Chunks with distance above this value are excluded from query results.
+MIN_RELEVANCE_DISTANCE = float(os.getenv("MIN_RELEVANCE_DISTANCE", "0.7"))
 
 # ---------------------------------------------------------------------------
 # File-type and directory filters
@@ -86,9 +96,40 @@ SKIP_DIRS = {
 }
 
 # Chunking parameters
-CHUNK_LINES = 60    # lines per chunk
-CHUNK_OVERLAP = 10  # lines shared between adjacent chunks (prevents split functions)
+CHUNK_LINES   = 60    # lines per chunk
+CHUNK_OVERLAP = 10    # lines shared between adjacent chunks
 MAX_FILE_BYTES = 500_000  # skip files larger than 500 KB
+
+# ---------------------------------------------------------------------------
+# Persistent HTTP client
+# ---------------------------------------------------------------------------
+
+_http_client: Optional[httpx.AsyncClient] = None
+
+
+def _get_http_client() -> httpx.AsyncClient:
+    """
+    Reuses a single AsyncClient for all Ollama calls.
+    Avoids TCP handshake + TLS overhead on every embedding request —
+    especially important during indexing where hundreds of requests fire.
+    """
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=10.0),
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
+    return _http_client
+
+
+# ---------------------------------------------------------------------------
+# Query embedding cache
+# ---------------------------------------------------------------------------
+
+_embed_cache: dict[str, tuple[list[float], float]] = {}
+_EMBED_CACHE_TTL = 300   # seconds — embeddings are stable within a session
+_EMBED_CACHE_MAX = 256   # max entries before evicting the oldest 20%
+
 
 # ---------------------------------------------------------------------------
 # ChromaDB client (lazy singleton)
@@ -119,41 +160,66 @@ def get_chroma_client() -> chromadb.PersistentClient:
 
 async def embed_text(text: str) -> list[float]:
     """
-    Embed a single text — used at query time (one query per chat message).
+    Embed a single text — used at query time.
 
-    Embeddings are only comparable when produced by the same model, so
-    indexing and retrieval must both use EMBED_MODEL.
+    Results are cached for _EMBED_CACHE_TTL seconds so repeated or similar
+    queries (e.g., follow-up questions about the same topic) skip the Ollama
+    round-trip entirely.
     """
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.post(
-            f"{OLLAMA_BASE_URL}/api/embeddings",
-            json={"model": EMBED_MODEL, "prompt": text},
-        )
-        resp.raise_for_status()
-        return resp.json()["embedding"]
+    cache_key = hashlib.md5(text.encode("utf-8")).hexdigest()
+    now = time.monotonic()
+
+    if cache_key in _embed_cache:
+        vec, ts = _embed_cache[cache_key]
+        if now - ts < _EMBED_CACHE_TTL:
+            return vec
+
+    embeddings = await embed_texts_batch([text])
+    vec = embeddings[0]
+
+    _embed_cache[cache_key] = (vec, now)
+    if len(_embed_cache) > _EMBED_CACHE_MAX:
+        sorted_keys = sorted(_embed_cache, key=lambda k: _embed_cache[k][1])
+        for k in sorted_keys[: _EMBED_CACHE_MAX // 5]:
+            del _embed_cache[k]
+
+    return vec
 
 
 async def embed_texts_batch(texts: list[str]) -> list[list[float]]:
     """
     Embed multiple texts in a single Ollama request using /api/embed.
 
-    This is the key performance improvement over embed_text: instead of one
-    HTTP round-trip per chunk, we send all chunks for a file together and get
-    all embeddings back in one response. For a file with 10 chunks, this is
-    10× fewer network calls.
+    Retries up to EMBED_RETRIES times with exponential backoff on transient
+    errors (Ollama restart, network blip, temporary overload).
 
-    Requires Ollama ≥ 0.1.31. The response shape is:
+    Requires Ollama ≥ 0.1.31. Response shape:
       { "embeddings": [[float, ...], [float, ...], ...] }
     """
     if not texts:
         return []
-    async with httpx.AsyncClient(timeout=300.0) as client:
-        resp = await client.post(
-            f"{OLLAMA_BASE_URL}/api/embed",
-            json={"model": EMBED_MODEL, "input": texts},
-        )
-        resp.raise_for_status()
-        return resp.json()["embeddings"]
+
+    client = _get_http_client()
+    last_err: Exception = RuntimeError("no attempts made")
+
+    for attempt in range(EMBED_RETRIES):
+        try:
+            resp = await client.post(
+                f"{OLLAMA_BASE_URL}/api/embed",
+                json={"model": EMBED_MODEL, "input": texts},
+            )
+            resp.raise_for_status()
+            return resp.json()["embeddings"]
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            last_err = exc
+            if attempt < EMBED_RETRIES - 1:
+                wait = 2 ** attempt  # 1s, 2s, 4s
+                logger.warning("Embed attempt %d failed (%s), retrying in %ds…", attempt + 1, exc, wait)
+                await asyncio.sleep(wait)
+
+    raise last_err
 
 
 # ---------------------------------------------------------------------------
@@ -198,35 +264,93 @@ def file_content_hash(content: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Chunking
+# Code-aware chunking
 # ---------------------------------------------------------------------------
 
-def chunk_file(content: str, file_path: str) -> list[dict]:
-    """
-    Split a source file into overlapping line-based chunks.
+# Regex patterns for top-level definition starts (per file extension).
+# These mark preferred split points — keeping each function/class intact.
+_BOUNDARY_PATTERNS: dict[str, re.Pattern] = {
+    ".py":   re.compile(r"^(async def |def |class )\w"),
+    ".js":   re.compile(r"^(function |class |export\b)"),
+    ".jsx":  re.compile(r"^(function |class |export\b)"),
+    ".ts":   re.compile(r"^(function |class |export\b|interface |type \w+ =)"),
+    ".tsx":  re.compile(r"^(function |class |export\b|interface |type \w+ =)"),
+    ".go":   re.compile(r"^func "),
+    ".rs":   re.compile(r"^(pub fn |fn |pub struct |struct |impl |pub impl )"),
+}
 
-    Each chunk carries the file path as a header so the LLM knows where
-    the code lives when it references it in its answer.
 
-    Overlap example (CHUNK_LINES=4, CHUNK_OVERLAP=1):
-      Lines 1-4  → chunk 0
-      Lines 4-7  → chunk 1   (line 4 shared)
-      Lines 7-10 → chunk 2   (line 7 shared)
-    """
-    lines = content.splitlines()
+def _line_chunks(lines: list[str], file_path: str, line_offset: int = 0) -> list[dict]:
+    """Pure line-based chunking with overlap — fallback for non-code or large sections."""
     chunks = []
     i = 0
     while i < len(lines):
-        segment = lines[i: i + CHUNK_LINES]
+        segment = lines[i : i + CHUNK_LINES]
         text = "\n".join(segment)
         if text.strip():
             chunks.append({
                 "text": f"# File: {file_path}\n\n{text}",
                 "file": file_path,
-                "start_line": i + 1,
-                "end_line": i + len(segment),
+                "start_line": line_offset + i + 1,
+                "end_line": line_offset + i + len(segment),
             })
         i += CHUNK_LINES - CHUNK_OVERLAP
+    return chunks
+
+
+def chunk_file(content: str, file_path: str) -> list[dict]:
+    """
+    Split a file into chunks, preferring natural code boundaries.
+
+    For Python, JS/TS, Go, and Rust we locate top-level definitions
+    (def/class/function/func/…) and treat those lines as section starts.
+    Each section becomes one chunk when it fits within CHUNK_LINES.
+    Sections that exceed CHUNK_LINES are sub-split with overlap so no
+    chunk grows beyond a reasonable token budget.
+
+    Non-code files (Markdown, YAML, JSON, …) fall back to line-based
+    chunking identical to the previous approach.
+    """
+    lines = content.splitlines()
+    if not lines:
+        return []
+
+    ext = Path(file_path).suffix.lower()
+    boundary_re = _BOUNDARY_PATTERNS.get(ext)
+
+    if not boundary_re:
+        return _line_chunks(lines, file_path)
+
+    # Find all line indices where a top-level definition begins
+    section_starts = [i for i, line in enumerate(lines) if boundary_re.match(line)]
+    if not section_starts:
+        return _line_chunks(lines, file_path)
+
+    # Build (start, end) pairs for each logical section
+    sections: list[tuple[int, int]] = []
+    if section_starts[0] > 0:
+        sections.append((0, section_starts[0]))  # preamble (imports, constants)
+    for j, start in enumerate(section_starts):
+        end = section_starts[j + 1] if j + 1 < len(section_starts) else len(lines)
+        sections.append((start, end))
+
+    chunks: list[dict] = []
+    for start, end in sections:
+        seg = lines[start:end]
+        if len(seg) <= CHUNK_LINES:
+            # Section fits in one chunk — keep it whole
+            text = "\n".join(seg)
+            if text.strip():
+                chunks.append({
+                    "text": f"# File: {file_path}\n\n{text}",
+                    "file": file_path,
+                    "start_line": start + 1,
+                    "end_line": end,
+                })
+        else:
+            # Oversized section (very long function) — sub-split with overlap
+            chunks.extend(_line_chunks(seg, file_path, line_offset=start))
+
     return chunks
 
 
@@ -311,7 +435,7 @@ async def index_codebase(
     ----------------------
     Up to INDEX_CONCURRENCY files embed simultaneously.  Each file's chunks
     are grouped into EMBED_BATCH_SIZE-sized batches → one HTTP call per batch,
-    not one per chunk.
+    not one per chunk.  Failed batches are retried up to EMBED_RETRIES times.
 
     Cancellation
     ------------
@@ -397,7 +521,7 @@ async def index_codebase(
 
             current_hash = file_content_hash(content)
             if hash_by_file.get(file_key) == current_hash:
-                skipped += 1    # content identical despite mtime change (e.g. touch) — keep as-is
+                skipped += 1    # content identical despite mtime change (e.g. touch)
                 continue
 
             # Changed or new file — remove stale chunks before re-embedding
@@ -453,7 +577,8 @@ async def index_codebase(
 
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                logger.warning("Failed to index %s: %s", rel_path, exc)
                 state["done"] += 1
                 if on_progress:
                     on_progress(state["done"], total_files, state["new_chunks"])
@@ -496,15 +621,15 @@ async def query_context(assistant_id: str, query: str, top_k: int = 5) -> list[s
     Retrieve the top-K most relevant code chunks for a user query.
 
     This is the *read* side of RAG:
-      1. Embed the query (same model as indexing)
+      1. Embed the query (cached — repeated queries skip the Ollama call).
       2. ChromaDB computes cosine similarity between the query vector
-         and every stored chunk vector
-      3. Return the top_k closest chunks as plain text
+         and every stored chunk vector.
+      3. Filter out low-relevance results (distance > MIN_RELEVANCE_DISTANCE).
+      4. Deduplicate overlapping chunks from the same file.
+      5. Return up to top_k chunks as plain text.
 
-    Cosine similarity: measures the angle between two vectors.
-      score = 1.0 → identical meaning
-      score = 0.0 → completely unrelated
-    ChromaDB returns results sorted by relevance automatically.
+    Fetching top_k * 3 candidates before filtering gives the deduplication
+    step room to work without returning too few results.
     """
     collection = get_collection(assistant_id)
     count = collection.count()
@@ -512,10 +637,37 @@ async def query_context(assistant_id: str, query: str, top_k: int = 5) -> list[s
         return []
 
     query_embedding = await embed_text(query)
+    n_fetch = min(top_k * 3, count)
+
     results = collection.query(
         query_embeddings=[query_embedding],
-        n_results=min(top_k, count),
-        include=["documents"],
+        n_results=n_fetch,
+        include=["documents", "metadatas", "distances"],
     )
 
-    return results.get("documents", [[]])[0]
+    docs      = results.get("documents",  [[]])[0]
+    metadatas = results.get("metadatas",  [[]])[0]
+    distances = results.get("distances",  [[]])[0]
+
+    seen_buckets: set[str] = set()
+    filtered: list[str] = []
+
+    for doc, meta, dist in zip(docs, metadatas, distances):
+        if dist > MIN_RELEVANCE_DISTANCE:
+            continue  # irrelevant — skip rather than inject noise
+
+        if meta:
+            file  = meta.get("file", "")
+            start = meta.get("start_line", 0)
+            # Group by ~half-chunk-size windows so adjacent overlapping chunks
+            # from the same file don't both make it into the result set.
+            bucket = f"{file}:{start // (CHUNK_LINES // 2)}"
+            if bucket in seen_buckets:
+                continue
+            seen_buckets.add(bucket)
+
+        filtered.append(doc)
+        if len(filtered) >= top_k:
+            break
+
+    return filtered

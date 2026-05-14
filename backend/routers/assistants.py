@@ -19,14 +19,16 @@ import asyncio
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 try:
     from .. import database, schemas
+    from ..auth import get_current_user
     from ..services import rag_service
 except ImportError:
     import database
     import schemas
+    from auth import get_current_user
     from services import rag_service
 
 router = APIRouter()
@@ -74,9 +76,17 @@ async def _cancel_task(assistant_id: str) -> None:
 # Routes
 # ---------------------------------------------------------------------------
 
+def _check_ownership(doc: dict, current_user: dict) -> None:
+    if current_user.get("role") == "admin":
+        return
+    if doc.get("user_id") and doc["user_id"] != str(current_user["_id"]):
+        raise HTTPException(status_code=404, detail="Assistant not found")
+
+
 @router.get("", response_model=list[schemas.AssistantInfo])
-async def list_assistants():
-    docs = list(database.assistants_collection.find().sort("created_at", -1))
+async def list_assistants(current_user: dict = Depends(get_current_user)):
+    query = {} if current_user.get("role") == "admin" else {"user_id": str(current_user["_id"])}
+    docs = list(database.assistants_collection.find(query).sort("created_at", -1))
     results = []
     for doc in docs:
         item = _serialize(doc)
@@ -87,7 +97,10 @@ async def list_assistants():
 
 
 @router.post("", response_model=schemas.AssistantInfo, status_code=201)
-async def create_assistant(req: schemas.AssistantCreateRequest):
+async def create_assistant(
+    req: schemas.AssistantCreateRequest,
+    current_user: dict = Depends(get_current_user),
+):
     """Create a new assistant. Indexing is NOT triggered here — call /index."""
     assistant_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
@@ -102,16 +115,21 @@ async def create_assistant(req: schemas.AssistantCreateRequest):
         "last_indexed": None,
         "created_at": now,
         "updated_at": now,
+        "user_id": str(current_user["_id"]),
     }
     database.assistants_collection.insert_one(doc)
     return _serialize(doc)
 
 
 @router.get("/{assistant_id}", response_model=schemas.AssistantInfo)
-async def get_assistant(assistant_id: str):
+async def get_assistant(
+    assistant_id: str,
+    current_user: dict = Depends(get_current_user),
+):
     doc = database.assistants_collection.find_one({"_id": assistant_id})
     if not doc:
         raise HTTPException(status_code=404, detail="Assistant not found")
+    _check_ownership(doc, current_user)
     result = _serialize(doc)
     if assistant_id in _index_status:
         result["index_status"] = _index_status[assistant_id].get("status", result["index_status"])
@@ -119,11 +137,16 @@ async def get_assistant(assistant_id: str):
 
 
 @router.patch("/{assistant_id}", response_model=schemas.AssistantInfo)
-async def update_assistant(assistant_id: str, req: schemas.AssistantUpdateRequest):
+async def update_assistant(
+    assistant_id: str,
+    req: schemas.AssistantUpdateRequest,
+    current_user: dict = Depends(get_current_user),
+):
     """Update name, description, or codebase_path of an existing assistant."""
     doc = database.assistants_collection.find_one({"_id": assistant_id})
     if not doc:
         raise HTTPException(status_code=404, detail="Assistant not found")
+    _check_ownership(doc, current_user)
 
     updates: dict = {"updated_at": datetime.now(timezone.utc)}
     if req.name is not None:
@@ -144,7 +167,10 @@ async def update_assistant(assistant_id: str, req: schemas.AssistantUpdateReques
 
 
 @router.delete("/{assistant_id}")
-async def delete_assistant(assistant_id: str):
+async def delete_assistant(
+    assistant_id: str,
+    current_user: dict = Depends(get_current_user),
+):
     """
     Delete the assistant and its vector index.
 
@@ -155,6 +181,7 @@ async def delete_assistant(assistant_id: str):
     doc = database.assistants_collection.find_one({"_id": assistant_id})
     if not doc:
         raise HTTPException(status_code=404, detail="Assistant not found")
+    _check_ownership(doc, current_user)
 
     # Stop indexing immediately if it's running
     await _cancel_task(assistant_id)
@@ -167,12 +194,17 @@ async def delete_assistant(assistant_id: str):
 
 
 @router.post("/{assistant_id}/add-path")
-async def add_path(assistant_id: str, path: str):
+async def add_path(
+    assistant_id: str,
+    path: str,
+    current_user: dict = Depends(get_current_user),
+):
     """Append an additional directory to index and trigger a re-index."""
     from pathlib import Path as _Path
     doc = database.assistants_collection.find_one({"_id": assistant_id})
     if not doc:
         raise HTTPException(status_code=404, detail="Assistant not found")
+    _check_ownership(doc, current_user)
     resolved = str(_Path(path).expanduser().resolve())
     if not _Path(resolved).exists():
         raise HTTPException(status_code=400, detail=f"Path does not exist: {path}")
@@ -197,11 +229,16 @@ async def add_path(assistant_id: str, path: str):
 
 
 @router.delete("/{assistant_id}/add-path")
-async def remove_path(assistant_id: str, path: str):
+async def remove_path(
+    assistant_id: str,
+    path: str,
+    current_user: dict = Depends(get_current_user),
+):
     """Remove an extra path from the assistant and trigger a full re-index."""
     doc = database.assistants_collection.find_one({"_id": assistant_id})
     if not doc:
         raise HTTPException(status_code=404, detail="Assistant not found")
+    _check_ownership(doc, current_user)
     extra_paths = [p for p in doc.get("extra_paths", []) if p != path]
     database.assistants_collection.update_one(
         {"_id": assistant_id},
@@ -219,7 +256,11 @@ async def remove_path(assistant_id: str, path: str):
 
 
 @router.post("/{assistant_id}/index")
-async def trigger_index(assistant_id: str, force: bool = False):
+async def trigger_index(
+    assistant_id: str,
+    force: bool = False,
+    current_user: dict = Depends(get_current_user),
+):
     """
     Start (re-)indexing in the background via asyncio.create_task.
 
@@ -231,6 +272,7 @@ async def trigger_index(assistant_id: str, force: bool = False):
     doc = database.assistants_collection.find_one({"_id": assistant_id})
     if not doc:
         raise HTTPException(status_code=404, detail="Assistant not found")
+    _check_ownership(doc, current_user)
 
     await _cancel_task(assistant_id)
 
@@ -253,8 +295,25 @@ async def trigger_index(assistant_id: str, force: bool = False):
     return {"status": "indexing"}
 
 
+@router.get("/{assistant_id}/files")
+async def list_indexed_files(
+    assistant_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Return the sorted list of file paths stored in this assistant's vector index."""
+    doc = database.assistants_collection.find_one({"_id": assistant_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Assistant not found")
+    _check_ownership(doc, current_user)
+    files = await asyncio.to_thread(rag_service.get_indexed_files, assistant_id)
+    return {"files": files}
+
+
 @router.get("/{assistant_id}/index/status")
-async def get_index_status(assistant_id: str):
+async def get_index_status(
+    assistant_id: str,
+    current_user: dict = Depends(get_current_user),
+):
     """Return live progress while indexing, or the final DB state when done."""
     if assistant_id in _index_status:
         return _index_status[assistant_id]
@@ -262,6 +321,7 @@ async def get_index_status(assistant_id: str):
     doc = database.assistants_collection.find_one({"_id": assistant_id})
     if not doc:
         raise HTTPException(status_code=404, detail="Assistant not found")
+    _check_ownership(doc, current_user)
 
     return {
         "status": doc.get("index_status", "not_indexed"),

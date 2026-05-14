@@ -1,6 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
+import 'katex/dist/katex.min.css';
 import hljs from 'highlight.js/lib/common';
 import {
   createConversation,
@@ -12,7 +15,10 @@ import {
   renameConversation,
   sendMessageStream,
 } from './api';
+import { useAuth } from './AuthContext';
+import AdminPage from './AdminPage';
 import AssistantsPage from './AssistantsPage';
+import LoginPage from './LoginPage';
 import './index.scss';
 
 const API_BASE = '/api';
@@ -293,7 +299,11 @@ const MD_COMPONENTS = {
 
 function MdContent({ children }) {
   return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm, remarkMath]}
+      rehypePlugins={[rehypeKatex]}
+      components={MD_COMPONENTS}
+    >
       {children || ''}
     </ReactMarkdown>
   );
@@ -830,7 +840,7 @@ function QuickDrawer({ open, onClose, selectedModel, settings }) {
 
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
 
-function Sidebar({ view, setView, activeId, setActiveId, conversations, onNew, onDelete, onRename, onConfig, status, statusDetail }) {
+function Sidebar({ view, setView, activeId, setActiveId, conversations, onNew, onDelete, onRename, onConfig, status, statusDetail, user, onLogout, isAdmin }) {
   const [search, setSearch] = useState('');
 
   const filtered = useMemo(() => {
@@ -877,6 +887,11 @@ function Sidebar({ view, setView, activeId, setActiveId, conversations, onNew, o
         <button className={`sb-tab ${view === 'assistants' ? 'active' : ''}`} onClick={() => setView('assistants')}>
           <Icon name="cube" size={13} /> Assistants
         </button>
+        {isAdmin && (
+          <button className={`sb-tab ${view === 'admin' ? 'active' : ''}`} onClick={() => setView('admin')}>
+            <Icon name="settings" size={13} /> Admin
+          </button>
+        )}
       </div>
 
       <div className="sb-list">
@@ -918,6 +933,20 @@ function Sidebar({ view, setView, activeId, setActiveId, conversations, onNew, o
           <span>ollama · <span className="name">{statusLabel}</span></span>
           <span style={{ marginLeft: 'auto', fontFamily: "'JetBrains Mono', monospace", fontSize: 10 }}>{status === 'ok' ? '●' : '○'}</span>
         </div>
+        {user && (
+          <div className="sb-user-row">
+            <div className="sb-user-avatar">{user.username.slice(0, 2).toUpperCase()}</div>
+            <div className="sb-user-info">
+              <div className="sb-user-name">{user.username}</div>
+              <div className="sb-user-role">{user.role}</div>
+            </div>
+            <button className="icon-btn" onClick={onLogout} title="Sign out">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>
+              </svg>
+            </button>
+          </div>
+        )}
         <div className="sb-foot-row">
           <button onClick={() => setView('chat')} title="Show all chats">
             <Icon name="history" size={11} /> HISTORY
@@ -1021,6 +1050,7 @@ function ConvItem({ conv, active, onSelect, onDelete, onRename }) {
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
+  const { user, logout, isAdmin } = useAuth();
   const [theme, setTheme] = useState(() => localStorage.getItem(THEME_KEY) || 'dark');
   const [view, setView] = useState('chat');
   const [activeConvId, setActiveConvId] = useState(null);
@@ -1032,7 +1062,7 @@ export default function App() {
   const [statusDetail, setStatusDetail] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => window.innerWidth < 860);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [ragOn, setRagOn] = useState(true);
@@ -1047,6 +1077,12 @@ export default function App() {
 
   const isOnline = useNetworkStatus();
   const messagesEndRef = useRef(null);
+
+  useEffect(() => {
+    const onResize = () => { if (window.innerWidth < 860) setCollapsed(true); };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -1107,12 +1143,14 @@ export default function App() {
     setAttachedImages([]);
     setPendingAssistant(null);
     setView('chat');
+    if (window.innerWidth < 860) setCollapsed(true);
   };
 
   const selectConv = async id => {
     setActiveConvId(id);
     setError('');
     setView('chat');
+    if (window.innerWidth < 860) setCollapsed(true);
     try {
       const detail = await fetchConversation(API_BASE, id);
       setMessages(detail.messages || []);
@@ -1249,24 +1287,30 @@ export default function App() {
   };
 
   const asstName = activeConv?.assistant_name || pendingAssistant?.name || null;
-  const eyebrow = view === 'assistants'
-    ? 'RAG — ASSISTANTS'
-    : asstName
-      ? `${asstName} · CHAT`
-      : 'CHAT';
+  const eyebrow = view === 'admin'
+    ? 'ADMIN'
+    : view === 'assistants'
+      ? 'RAG — ASSISTANTS'
+      : asstName
+        ? `${asstName} · CHAT`
+        : 'CHAT';
 
-  const headerTitle = view === 'assistants'
-    ? 'Assistants'
-    : activeConv
-      ? convTitle(activeConv)
-      : 'New conversation';
+  const headerTitle = view === 'admin'
+    ? 'User Management'
+    : view === 'assistants'
+      ? 'Assistants'
+      : activeConv
+        ? convTitle(activeConv)
+        : 'New conversation';
+
+  if (!user) return <LoginPage />;
 
   return (
     <ErrorBoundary>
     <div className={`app ${collapsed ? 'no-sidebar' : ''}`} onClick={() => setSettingsOpen(false)}>
       <Sidebar
         view={view}
-        setView={setView}
+        setView={v => { setView(v); if (window.innerWidth < 860) setCollapsed(true); }}
         activeId={activeConvId}
         setActiveId={id => selectConv(id)}
         conversations={conversations}
@@ -1276,7 +1320,12 @@ export default function App() {
         onConfig={e => { e.stopPropagation(); setSettingsOpen(s => !s); }}
         status={status}
         statusDetail={statusDetail}
+        user={user}
+        onLogout={logout}
+        isAdmin={isAdmin}
       />
+
+      {!collapsed && <div className="sb-overlay" onClick={() => setCollapsed(true)} />}
 
       <main className="main">
         {!isOnline && <OfflineBanner />}
@@ -1330,7 +1379,9 @@ export default function App() {
           </div>
         </header>
 
-        {view === 'assistants' ? (
+        {view === 'admin' && isAdmin ? (
+          <AdminPage />
+        ) : view === 'assistants' ? (
           <AssistantsPage
             models={models}
             onOpenChat={a => {

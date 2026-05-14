@@ -7,9 +7,12 @@ import httpx
 
 try:
     from .. import schemas, database
+    from ..auth import get_current_user
     from ..services import conversation_service, ollama_service, rag_service
 except ImportError:
-    import schemas, database
+    import schemas
+    import database
+    from auth import get_current_user
     from services import conversation_service, ollama_service, rag_service
 
 router = APIRouter()
@@ -25,7 +28,11 @@ def build_auto_title(message_text: str) -> str:
 
 
 @router.post("/chat", response_model=schemas.MessageResponse)
-async def send_chat(req: schemas.ChatRequest, db = Depends(database.get_db)):
+async def send_chat(
+    req: schemas.ChatRequest,
+    db=Depends(database.get_db),
+    current_user: dict = Depends(get_current_user),
+):
     """Non-streaming chat endpoint."""
     model = req.model or "mistral"
     temperature = req.temperature
@@ -35,10 +42,12 @@ async def send_chat(req: schemas.ChatRequest, db = Depends(database.get_db)):
 
     # Create conversation if needed
     conv_id = req.conversation_id
+    user_id = str(current_user["_id"])
     if not conv_id:
         conv = conversation_service.create_conversation(
             db, title=message_text[:50] or "New Chat", model=model,
             temperature=temperature, top_p=top_p, max_tokens=max_tokens,
+            user_id=user_id,
         )
         conv_id = conv["id"]
         # Update settings for first message
@@ -54,6 +63,8 @@ async def send_chat(req: schemas.ChatRequest, db = Depends(database.get_db)):
     else:
         conv = conversation_service.get_conversation(db, conv_id)
         if not conv:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        if current_user.get("role") != "admin" and conv.get("user_id") and conv["user_id"] != user_id:
             raise HTTPException(status_code=404, detail="Conversation not found")
 
     if conversation_service.should_autotitle_conversation(conv):
@@ -185,23 +196,29 @@ async def send_chat_stream(request: Request):
 
 
 @router.post("/chat/stream")
-async def send_chat_stream_post(req: schemas.ChatRequest):
+async def send_chat_stream_post(
+    req: schemas.ChatRequest,
+    current_user: dict = Depends(get_current_user),
+):
     """Streaming chat via POST."""
     conv_id = req.conversation_id
     model = req.model or "mistral"
     temperature = req.temperature
     top_p = req.top_p
+    user_id = str(current_user["_id"])
 
     # Create or look up conversation outside the generator
     if not conv_id:
         conv = conversation_service.create_conversation(
             database.db, title=req.message[:50] or "New Chat", model=model,
-            temperature=temperature, top_p=top_p,
+            temperature=temperature, top_p=top_p, user_id=user_id,
         )
         conv_id = conv["id"]
     else:
         conv = conversation_service.get_conversation(database.db, conv_id)
         if not conv:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        if current_user.get("role") != "admin" and conv.get("user_id") and conv["user_id"] != user_id:
             raise HTTPException(status_code=404, detail="Conversation not found")
 
     # Get conversation history + add user message
