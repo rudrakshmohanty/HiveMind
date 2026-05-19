@@ -44,8 +44,8 @@ services:
         condition: service_healthy
     environment:
       - OLLAMA_BASE_URL=http://hivemind-ollama:11434
-      - MONGODB_URL=${MONGODB_URL:-mongodb://hivemind-mongo:27017}
-      - MONGODB_DB=${MONGODB_DB:-hivemind}
+      - MONGODB_URL=mongodb://hivemind-mongo:27017
+      - MONGODB_DB=hivemind
       - EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
       - CHROMA_PATH=/app/chroma_db
     volumes:

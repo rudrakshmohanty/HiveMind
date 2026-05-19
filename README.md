@@ -26,15 +26,15 @@
 
 > _HiveMind running locally in light and dark mode._
 
-| Chat | Assistants |
-|------|------------|
+| Chat                                                                                         | Assistants                                                                                         |
+| -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
 | ![Chat light](https://github.com/user-attachments/assets/910d7dd1-4358-4108-b730-3d69a28da738) | ![Assistants light](https://github.com/user-attachments/assets/e675d2ae-5c6a-4f79-baeb-8454fb33482d) |
-| ![Chat dark](https://github.com/user-attachments/assets/db7bd8aa-90d8-414e-a27e-640176fadf85) | ![Assistants dark](https://github.com/user-attachments/assets/d33e598e-eed4-455d-9c8d-70cb5a91149d) |
+| ![Chat dark](https://github.com/user-attachments/assets/db7bd8aa-90d8-414e-a27e-640176fadf85)  | ![Assistants dark](https://github.com/user-attachments/assets/d33e598e-eed4-455d-9c8d-70cb5a91149d)  |
 
-| Code rendering | Model selector |
-|----------------|----------------|
+| Code rendering                                                                               | Model selector                                                                                         |
+| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
 | ![Code light](https://github.com/user-attachments/assets/4a65f3b1-7a1d-475a-83b4-a03dae121c80) | ![Model selector light](https://github.com/user-attachments/assets/75207bcf-2228-43de-84dd-240be7d75d88) |
-| ![Code dark](https://github.com/user-attachments/assets/ea6ab6c2-88e9-4d92-ac3f-7451c1c6a877) | ![Model selector dark](https://github.com/user-attachments/assets/1d77a652-6a92-4211-9ae4-6f20b22cbbc4) |
+| ![Code dark](https://github.com/user-attachments/assets/ea6ab6c2-88e9-4d92-ac3f-7451c1c6a877)  | ![Model selector dark](https://github.com/user-attachments/assets/1d77a652-6a92-4211-9ae4-6f20b22cbbc4)  |
 
 ---
 
@@ -252,17 +252,15 @@ Open a new terminal while the stack is running:
 
 ```bash
 # Chat model (swap for any model you like)
-docker exec -it hivemind-ollama ollama pull mistral
-
 # Embedding model — required for Codespace Assistants
 docker exec -it hivemind-ollama ollama pull nomic-embed-text
 ```
 
 ### 4 · Open HiveMind
 
-| Device | URL |
-|--------|-----|
-| Same machine | `http://localhost:3000` |
+| Device                    | URL                       |
+| ------------------------- | ------------------------- |
+| Same machine              | `http://localhost:3000` |
 | Other device on same WiFi | `http://<your-ip>:3000` |
 
 To find your local IP (for accessing from another device):
@@ -298,12 +296,12 @@ docker compose down -v
 
 ### Services
 
-| Service | Port | Description |
-|---------|------|-------------|
-| HiveMind | `3000` | Main app (nginx) |
-| Backend API | `8000` | FastAPI — also at `/api/` via nginx |
-| Ollama | `11434` | LLM runtime |
-| MongoDB | `27017` | Chat + assistant storage |
+| Service     | Port      | Description                            |
+| ----------- | --------- | -------------------------------------- |
+| HiveMind    | `3000`  | Main app (nginx)                       |
+| Backend API | `8000`  | FastAPI — also at `/api/` via nginx |
+| Ollama      | `11434` | LLM runtime                            |
+| MongoDB     | `27017` | Chat + assistant storage               |
 
 ---
 

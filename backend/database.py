@@ -3,9 +3,9 @@ import os
 from dotenv import load_dotenv
 from pymongo import MongoClient
 
-load_dotenv()
+load_dotenv(override=False)  # Docker Compose env vars take precedence over .env
 
-MONGODB_URL = os.getenv("MONGODB_URL")
+MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
 MONGODB_DB = os.getenv("MONGODB_DB", "hivemind")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
